@@ -33,23 +33,44 @@
   <img src="https://github.com/dhhruv/Chrome-Dino-Runner/blob/master/assets/Other/Chrome%20Dino.gif">
 </p>
 
+### Project Structure:
+
+```
+chrome-dino-runner/
+├── assets/                 # Game assets (images, sprites)
+│   ├── Bird/              # Bird obstacle sprites
+│   ├── Cactus/            # Cactus obstacle sprites
+│   ├── Dino/              # Dinosaur character sprites
+│   └── Other/             # Other game assets
+├── figures/               # Game character modules
+│   ├── __init__.py        # Package initialization
+│   ├── dinosaur.py        # Dinosaur character class
+│   ├── cloud.py           # Cloud background class
+│   ├── obstacles.py       # Obstacle classes (Cactus, Bird)
+│   └── configurations.py  # Game assets and configuration
+├── helpers.py             # Utility functions
+├── chromedino.py          # Main game file
+├── requirements.txt       # Python dependencies
+└── README.md             # Project documentation
+```
+
 ### Installation:
 
 -	First of all, **clone the repository** using:
 ```
-git clone https://github.com/dhhruv/Chrome-Dino-Runner.git
+git clone https://github.com/LadinaM/chrome-dino-runner.git
 ``` 
 **OR**
 Download the Zip and extract it's contents.
 
 -	Then download the dependencies in your Command Prompt OR Terminal using:
 ```
-pip install requirements.txt
+pip install -r requirements.txt
 ```
 
 ### Usage:
 
--	After installation, just run the [`chromedino.py`](https://github.com/dhhruv/Chrome-Dino-Runner/blob/master/chromedino.py) using
+-	After installation, just run the [`chromedino.py`](https://github.com/LadinaM/chrome-dino-runner/blob/master/chromedino.py) using
 ```
 python chromedino.py
 ```
@@ -58,9 +79,12 @@ python chromedino.py
 
 | Keys              | Actions                                                       |
 |-------------------|---------------------------------------------------------------|
-|  `Any Key`        |    Press any key to Start the Game.                           | 
+|  `Any Key`        |    Press any key to start the Game.                           | 
 |   **&#8593;**     |    Press `Up Arrow` to jump and avoid cacti.                  |
-|   **&#8595;**     |    Press `DOwn Arrow` to duck and avoid pterodactyls.         |
+|   **&#8595;**     |    Press `Down Arrow` to duck and avoid pterodactyls.         |
+|   `p`             |    Pause the game      |
+|   `ESC`           |    Pause the game (alternative to 'p')      |
+|   `u`             |    Unpause the game     |
 
 
 ### References:
