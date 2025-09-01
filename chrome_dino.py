@@ -1,72 +1,64 @@
 # !/usr/bin/python
 # -*- coding: utf-8 -*-
 import datetime
-import os
-import random
 import threading
 
 import pygame
 
 # Import game figures
-from figures.dinosaur import Dinosaur
-from figures.cloud import Cloud
-from figures.obstacles import SmallCactus, LargeCactus, Bird
-from figures.configurations import load_game_assets
 from helpers import get_high_score
 
-pygame.init()
+# Import shared game settings
+from game import GameSettings, GameState, GameObjects, GameRenderer, GameInitializer
 
-# Global Constants
-SCREEN_HEIGHT = 600
-SCREEN_WIDTH = 1100
-SCREEN = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-
-pygame.display.set_caption("Chrome Dino Runner")
+# Initialize pygame and create screen
+SCREEN = GameInitializer.initialize_pygame()
 
 # Load game assets
-ASSETS = load_game_assets()
-pygame.display.set_icon(ASSETS['ICON'])
+ASSETS = GameInitializer.load_assets()
 
-FONT_COLOR=(0,0,0)
+# Setup display
+GameInitializer.setup_display(SCREEN, ASSETS)
+
+FONT_COLOR = GameSettings.FONT_COLOR
 
 def main():
     global game_speed, x_pos_bg, y_pos_bg, points, obstacles
     run = True
     clock = pygame.time.Clock()
-    game_speed = 20
-    player = Dinosaur(ASSETS['RUNNING'], ASSETS['JUMPING'], ASSETS['DUCKING'])
-    cloud = Cloud(ASSETS['CLOUD'], SCREEN_WIDTH, game_speed)
-    x_pos_bg = 0
-    y_pos_bg = 380
-    points = 0
-    font = pygame.font.Font("freesansbold.ttf", 20)
-    obstacles = []
+    
+    # Initialize game state and objects
+    game_state = GameState()
+    game_objects = GameObjects(ASSETS)
+    game_objects.initialize(game_state.game_speed)
+    
+    # Local variables for backward compatibility
+    game_speed = game_state.game_speed
+    x_pos_bg = game_state.x_pos_bg
+    y_pos_bg = game_state.y_pos_bg
+    points = game_state.points
+    obstacles = game_state.obstacles
+    
     death_count = 0
     pause = False
 
     def score():
         global points, game_speed
-        points += 1
-        if points % 100 == 0:
-            game_speed += 1
+        game_state.update_score()
+        points = game_state.points
+        game_speed = game_state.game_speed
+        
         current_time = datetime.datetime.now().hour
         highscore = get_high_score()
         if points > highscore:
             highscore = points 
-        text = font.render("High Score: "+ str(highscore) + "  Points: " + str(points), True, FONT_COLOR)
-        textRect = text.get_rect()
-        textRect.center = (900, 40)
-        SCREEN.blit(text, textRect)
+        GameRenderer.render_score(SCREEN, game_objects.font, points, highscore)
 
     def background():
         global x_pos_bg, y_pos_bg
-        image_width = ASSETS['BG'].get_width()
-        SCREEN.blit(ASSETS['BG'], (x_pos_bg, y_pos_bg))
-        SCREEN.blit(ASSETS['BG'], (image_width + x_pos_bg, y_pos_bg))
-        if x_pos_bg <= -image_width:
-            SCREEN.blit(ASSETS['BG'], (image_width + x_pos_bg, y_pos_bg))
-            x_pos_bg = 0
-        x_pos_bg -= game_speed
+        GameRenderer.update_background(SCREEN, ASSETS, game_state)
+        x_pos_bg = game_state.x_pos_bg
+        y_pos_bg = game_state.y_pos_bg
 
     def unpause():
         nonlocal pause, run
@@ -79,7 +71,7 @@ def main():
         font = pygame.font.Font("freesansbold.ttf", 30)
         text = font.render("Game Paused, Press 'u' to Unpause", True, FONT_COLOR)
         textRect = text.get_rect()
-        textRect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT  // 3)
+        textRect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT  // 3)
         SCREEN.blit(text, textRect)
         pygame.display.update()
 
@@ -99,37 +91,30 @@ def main():
                 run = False
                 paused()
 
-        current_time = datetime.datetime.now().hour
-        if 7 < current_time < 19:
-            SCREEN.fill((255, 255, 255))
-        else:
-            SCREEN.fill((0, 0, 0))
+        # Fill screen with background color
+        SCREEN.fill(GameSettings.get_background_color())
+        
         userInput = pygame.key.get_pressed()
 
-        player.draw(SCREEN)
-        player.update(userInput)
+        game_objects.player.draw(SCREEN)
+        game_objects.player.update(userInput)
 
-        if len(obstacles) == 0:
-            obstacle_type = random.randint(0, 2)
-            if obstacle_type == 0:
-                obstacles.append(SmallCactus(ASSETS['SMALL_CACTUS']))
-            elif obstacle_type == 1:
-                obstacles.append(LargeCactus(ASSETS['LARGE_CACTUS']))
-            elif obstacle_type == 2:
-                obstacles.append(Bird(ASSETS['BIRD']))
+        # Spawn obstacles
+        game_objects.spawn_obstacle(game_state.obstacles)
+        obstacles = game_state.obstacles  # Update local reference
 
         for obstacle in obstacles:
             obstacle.draw(SCREEN)
             obstacle.update(game_speed, obstacles)
-            if player.dino_rect.colliderect(obstacle.rect):
+            if game_objects.player.dino_rect.colliderect(obstacle.rect):
                 pygame.time.delay(2000)
                 death_count += 1
                 menu(death_count)
 
         background()
 
-        cloud.draw(SCREEN)
-        cloud.update(game_speed)
+        game_objects.cloud.draw(SCREEN)
+        game_objects.cloud.update(game_speed)
 
         score()
 
@@ -142,13 +127,8 @@ def menu(death_count):
     global FONT_COLOR
     run = True
     while run:
-        current_time = datetime.datetime.now().hour
-        if 7 < current_time < 19:
-            FONT_COLOR=(0,0,0)
-            SCREEN.fill((255, 255, 255))
-        else:
-            FONT_COLOR=(255,255,255)
-            SCREEN.fill((128, 128, 128))
+        FONT_COLOR = GameSettings.FONT_COLOR
+        SCREEN.fill(GameSettings.get_background_color())
         font = pygame.font.Font("freesansbold.ttf", 30)
 
         if death_count == 0:
@@ -157,7 +137,7 @@ def menu(death_count):
             text = font.render("Press any Key to Restart", True, FONT_COLOR)
             score = font.render("Your Score: " + str(points), True, FONT_COLOR)
             scoreRect = score.get_rect()
-            scoreRect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50)
+            scoreRect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2 + 50)
             SCREEN.blit(score, scoreRect)
             f = open("score.txt", "a")
             f.write(str(points) + "\n")
@@ -167,12 +147,12 @@ def menu(death_count):
                 "High Score : " + str(highscore), True, FONT_COLOR
             )
             hs_score_rect = hs_score_text.get_rect()
-            hs_score_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 100)
+            hs_score_rect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2 + 100)
             SCREEN.blit(hs_score_text, hs_score_rect)
         textRect = text.get_rect()
-        textRect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+        textRect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2)
         SCREEN.blit(text, textRect)
-        SCREEN.blit(ASSETS['RUNNING'][0], (SCREEN_WIDTH // 2 - 20, SCREEN_HEIGHT // 2 - 140))
+        SCREEN.blit(ASSETS['RUNNING'][0], (GameSettings.SCREEN_WIDTH // 2 - 20, GameSettings.SCREEN_HEIGHT // 2 - 140))
         pygame.display.update()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:

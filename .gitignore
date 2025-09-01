@@ -1,3 +1,14 @@
 *.bat
 .idea/
 score.txt
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+tensorboard_logs/
+best_model/
+checkpoints/
+logs/
+dino_final_model

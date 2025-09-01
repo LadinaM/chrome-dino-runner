@@ -1,1 +1,6 @@
 pygame==2.6.1
+gymnasium==0.29.1
+numpy>=1.26.0
+stable-baselines3==2.1.0
+torch>=2.0.0
+tensorboard>=2.20.0
