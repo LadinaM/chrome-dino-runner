@@ -1,6 +1,7 @@
 *.bat
 .idea/
 score.txt
+current_highscore.txt
 __pycache__/
 *.pyc
 *.pyo

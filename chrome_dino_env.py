@@ -124,27 +124,28 @@ class ChromeDinoEnv(gym.Env):
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """Take a step in the environment"""
         # Convert action to pygame key state dictionary
-        userInput = pygame.key.get_pressed()
+        user_input = pygame.key.get_pressed()
         
         # Create a custom key state for our actions
         # We'll simulate key presses by creating a custom input handler
-        if action == 1:  # Jump
+        match action:
+            case 1:  # Jump
             # Simulate UP or SPACE key press
-            userInput = type('MockKeys', (), {
-                '__getitem__': lambda self, key: True if key in [pygame.K_UP, pygame.K_SPACE] else False
-            })()
-        elif action == 2:  # Duck
-            # Simulate DOWN key press
-            userInput = type('MockKeys', (), {
-                '__getitem__': lambda self, key: True if key == pygame.K_DOWN else False
-            })()
-        else:  # Do nothing
-            userInput = type('MockKeys', (), {
-                '__getitem__': lambda self, key: False
-            })()
+                user_input = type('MockKeys', (), {
+                    '__getitem__': lambda x, key: True if key in [pygame.K_UP, pygame.K_SPACE] else False
+                })()
+            case 2:  # Duck
+                # Simulate DOWN key press
+                user_input = type('MockKeys', (), {
+                    '__getitem__': lambda x, key: True if key == pygame.K_DOWN else False
+                })()
+            case _:  # Do nothing
+                user_input = type('MockKeys', (), {
+                    '__getitem__': lambda x, key: False
+                })()
         
         # Update player
-        self.game_objects.player.update(userInput)
+        self.game_objects.player.update(user_input)
         
         # Spawn obstacles
         self.game_objects.spawn_obstacle(self.game_state.obstacles)

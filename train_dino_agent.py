@@ -6,6 +6,12 @@ from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from chrome_dino_env import ChromeDinoEnv
 
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logging.getLogger("stable_baselines3").setLevel(logging.INFO)
+
 def make_env():
     """Create a single environment"""
     env = ChromeDinoEnv(render_mode=None)  # No rendering during training for speed
@@ -43,7 +49,7 @@ def main():
         learning_rate=3e-4,
         n_steps=2048,
         batch_size=64,
-        n_epochs=10,
+        n_epochs=20,  # 10
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
@@ -51,18 +57,16 @@ def main():
         tensorboard_log="./tensorboard_logs/"
     )
     
-    # Train the model
-    print("Starting training...")
+
+    logger.info("Starting training...")
     model.learn(
-        total_timesteps=100000,
+        total_timesteps=150_000,
         callback=[eval_callback, checkpoint_callback]
     )
-    
-    # Save the final model
+
     model.save("dino_final_model")
-    
-    # Test the trained model
-    print("Testing trained model...")
+
+    logger.info("Testing trained model...")
     test_env = ChromeDinoEnv(render_mode="human")
     
     obs, info = test_env.reset()

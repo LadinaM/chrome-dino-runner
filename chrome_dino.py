@@ -1,14 +1,9 @@
-# !/usr/bin/python
-# -*- coding: utf-8 -*-
 import datetime
 import threading
 
 import pygame
 
-# Import game figures
 from helpers import get_high_score
-
-# Import shared game settings
 from game import GameSettings, GameState, GameObjects, GameRenderer, GameInitializer
 
 # Initialize pygame and create screen
@@ -94,10 +89,10 @@ def main():
         # Fill screen with background color
         SCREEN.fill(GameSettings.get_background_color())
         
-        userInput = pygame.key.get_pressed()
+        user_input = pygame.key.get_pressed()
 
         game_objects.player.draw(SCREEN)
-        game_objects.player.update(userInput)
+        game_objects.player.update(user_input)
 
         # Spawn obstacles
         game_objects.spawn_obstacle(game_state.obstacles)
@@ -125,7 +120,7 @@ def main():
 def menu(death_count):
     global points
     global FONT_COLOR
-    run = True
+    run: bool = True
     while run:
         FONT_COLOR = GameSettings.FONT_COLOR
         SCREEN.fill(GameSettings.get_background_color())
@@ -136,9 +131,9 @@ def menu(death_count):
         elif death_count > 0:
             text = font.render("Press any Key to Restart", True, FONT_COLOR)
             score = font.render("Your Score: " + str(points), True, FONT_COLOR)
-            scoreRect = score.get_rect()
-            scoreRect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2 + 50)
-            SCREEN.blit(score, scoreRect)
+            score_rect = score.get_rect()
+            score_rect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2 + 50)
+            SCREEN.blit(score, score_rect)
             f = open("score.txt", "a")
             f.write(str(points) + "\n")
             f.close()
@@ -149,9 +144,9 @@ def menu(death_count):
             hs_score_rect = hs_score_text.get_rect()
             hs_score_rect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2 + 100)
             SCREEN.blit(hs_score_text, hs_score_rect)
-        textRect = text.get_rect()
-        textRect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2)
-        SCREEN.blit(text, textRect)
+        text_rect = text.get_rect()
+        text_rect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2)
+        SCREEN.blit(text, text_rect)
         SCREEN.blit(ASSETS['RUNNING'][0], (GameSettings.SCREEN_WIDTH // 2 - 20, GameSettings.SCREEN_HEIGHT // 2 - 140))
         pygame.display.update()
         for event in pygame.event.get():
