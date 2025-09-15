@@ -84,12 +84,12 @@ def main():
             episode_reward += reward
             
             if terminated:
-                print(f"Episode {episode_count + 1} finished with score: {info['score']}")
+                logger.info(f"Episode {episode_count + 1} finished with score: {info['score']}")
                 episode_count += 1
                 break
     
     test_env.close()
-    print("Training and testing completed!")
+    logger.info("Training and testing completed!")
 
 if __name__ == "__main__":
     main()

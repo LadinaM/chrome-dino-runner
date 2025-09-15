@@ -5,35 +5,37 @@ from figures.dinosaur import Dinosaur
 from figures.cloud import Cloud
 from figures.obstacles import SmallCactus, LargeCactus, Bird
 from figures.configurations import load_game_assets
+from helpers import MovementType, AssetClass
+
 
 class GameSettings:
     """Shared game settings and constants"""
     
     # Screen dimensions
-    SCREEN_HEIGHT = 600
-    SCREEN_WIDTH = 1100
+    SCREEN_HEIGHT: int = 600
+    SCREEN_WIDTH: int = 1100
     
     # Background position
-    Y_POS_BG = 380
+    Y_POS_BG: int = 380
     
     # Initial game speed
-    INITIAL_GAME_SPEED = 20
+    INITIAL_GAME_SPEED: int = 20
     
     # Font settings
-    FONT_COLOR = (0, 0, 0)
-    FONT_SIZE = 20
+    FONT_COLOR: tuple[int, int, int] = (0, 0, 0)
+    FONT_SIZE: int = 20
     
     # Game speed increase interval
-    SPEED_INCREASE_INTERVAL = 100
+    SPEED_INCREASE_INTERVAL: int = 100
     
     @classmethod
-    def get_background_color(cls):
+    def get_background_color(cls) -> tuple[int, int, int]:
         """Get background color based on time of day"""
         current_time = datetime.datetime.now().hour
         if 7 < current_time < 19:
-            return (255, 255, 255)  # White for day
+            return 255, 255, 255  # White for day
         else:
-            return (0, 0, 0)  # Black for night
+            return 0, 0, 0  # Black for night
 
 class GameState:
     """Shared game state management"""
@@ -70,20 +72,21 @@ class GameObjects:
         
     def initialize(self, game_speed):
         """Initialize game objects"""
-        self.player = Dinosaur(self.assets['RUNNING'], self.assets['JUMPING'], self.assets['DUCKING'])
-        self.cloud = Cloud(self.assets['CLOUD'], GameSettings.SCREEN_WIDTH, game_speed)
+        self.player = Dinosaur(self.assets[MovementType.RUNNING], self.assets[MovementType.JUMPING], self.assets[MovementType.DUCKING])
+        self.cloud = Cloud(self.assets[AssetClass.CLOUD], GameSettings.SCREEN_WIDTH, game_speed)
         self.font = pygame.font.Font("freesansbold.ttf", GameSettings.FONT_SIZE)
     
     def spawn_obstacle(self, obstacles):
         """Spawn a random obstacle"""
         if len(obstacles) == 0:
             obstacle_type = random.randint(0, 2)
-            if obstacle_type == 0:
-                obstacles.append(SmallCactus(self.assets['SMALL_CACTUS']))
-            elif obstacle_type == 1:
-                obstacles.append(LargeCactus(self.assets['LARGE_CACTUS']))
-            elif obstacle_type == 2:
-                obstacles.append(Bird(self.assets['BIRD']))
+            match obstacle_type:
+                case 0:
+                    obstacles.append(SmallCactus(self.assets[AssetClass.SMALL_CACTUS]))
+                case 1:
+                    obstacles.append(LargeCactus(self.assets[AssetClass.LARGE_CACTUS]))
+                case 2:
+                    obstacles.append(Bird(self.assets[AssetClass.BIRD]))
 
 class GameRenderer:
     """Shared game rendering functions"""

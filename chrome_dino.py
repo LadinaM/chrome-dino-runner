@@ -3,7 +3,7 @@ import threading
 
 import pygame
 
-from helpers import get_high_score
+from helpers import get_high_score, MovementType
 from game import GameSettings, GameState, GameObjects, GameRenderer, GameInitializer
 
 # Initialize pygame and create screen
@@ -16,6 +16,8 @@ ASSETS = GameInitializer.load_assets()
 GameInitializer.setup_display(SCREEN, ASSETS)
 
 FONT_COLOR = GameSettings.FONT_COLOR
+
+DELAY_IN_MS: int = 2000
 
 def main():
     global game_speed, x_pos_bg, y_pos_bg, points, obstacles
@@ -102,7 +104,7 @@ def main():
             obstacle.draw(SCREEN)
             obstacle.update(game_speed, obstacles)
             if game_objects.player.dino_rect.colliderect(obstacle.rect):
-                pygame.time.delay(2000)
+                pygame.time.delay(DELAY_IN_MS)
                 death_count += 1
                 menu(death_count)
 
@@ -147,7 +149,7 @@ def menu(death_count):
         text_rect = text.get_rect()
         text_rect.center = (GameSettings.SCREEN_WIDTH // 2, GameSettings.SCREEN_HEIGHT // 2)
         SCREEN.blit(text, text_rect)
-        SCREEN.blit(ASSETS['RUNNING'][0], (GameSettings.SCREEN_WIDTH // 2 - 20, GameSettings.SCREEN_HEIGHT // 2 - 140))
+        SCREEN.blit(ASSETS[MovementType.RUNNING][0], (GameSettings.SCREEN_WIDTH // 2 - 20, GameSettings.SCREEN_HEIGHT // 2 - 140))
         pygame.display.update()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
