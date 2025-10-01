@@ -1,12 +1,11 @@
-import os
-import numpy as np
+import logging
+
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
-from chrome_dino_env import ChromeDinoEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
-import logging
+from chrome_dino_env import ChromeDinoEnv
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -14,7 +13,7 @@ logging.getLogger("stable_baselines3").setLevel(logging.INFO)
 
 def make_env():
     """Create a single environment"""
-    env = ChromeDinoEnv(render_mode=None)  # No rendering during training for speed
+    env = ChromeDinoEnv(render_mode=None)
     env = Monitor(env)
     return env
 
@@ -82,6 +81,7 @@ def main():
             action, _states = model.predict(obs, deterministic=True)
             obs, reward, terminated, truncated, info = test_env.step(action)
             episode_reward += reward
+            total_reward += reward
             
             if terminated:
                 logger.info(f"Episode {episode_count + 1} finished with score: {info['score']}")
@@ -89,6 +89,7 @@ def main():
                 break
     
     test_env.close()
+    logger.info(f"Total reward: {total_reward}")
     logger.info("Training and testing completed!")
 
 if __name__ == "__main__":

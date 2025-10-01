@@ -1,33 +1,35 @@
-import numpy as np
+import logging
+
 from chrome_dino_env import ChromeDinoEnv
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def test_environment():
     """Test the Chrome Dino environment"""
-    print("Testing Chrome Dino Environment...")
-    
-    # Create environment
+    logger.info("Testing Chrome Dino Environment...")
     env = ChromeDinoEnv(render_mode="human")
     
     # Test reset
-    print("Testing reset...")
+    logger.info("Testing reset...")
     obs, info = env.reset()
-    print(f"Initial observation: {obs}")
-    print(f"Initial info: {info}")
+    logger.info(f"Initial observation: {obs}")
+    logger.info(f"Initial info: {info}")
     
     # Test a few random actions
-    print("Testing random actions...")
+    logger.info("Testing random actions...")
     for i in range(100):
         action = env.action_space.sample()  # Random action
         obs, reward, terminated, truncated, info = env.step(action)
         
-        print(f"Step {i+1}: Action={action}, Reward={reward}, Terminated={terminated}, Score={info['score']}")
+        logger.info(f"Step {i+1}: Action={action}, Reward={reward}, Terminated={terminated}, Score={info['score']}")
         
         if terminated:
-            print("Episode ended!")
+            logger.info("Episode ended!")
             break
     
     env.close()
-    print("Environment test completed!")
+    logger.info("Environment test completed!")
 
 if __name__ == "__main__":
     test_environment()
