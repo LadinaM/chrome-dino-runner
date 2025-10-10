@@ -10,23 +10,13 @@ from helpers import MovementType, AssetClass
 
 class GameSettings:
     """Shared game settings and constants"""
-    
-    # Screen dimensions
-    SCREEN_HEIGHT: int = 600
-    SCREEN_WIDTH: int = 1100
-    
-    # Background position
-    Y_POS_BG: int = 380
-    
-    # Initial game speed
-    INITIAL_GAME_SPEED: int = 20
-    
-    # Font settings
-    FONT_COLOR: tuple[int, int, int] = (0, 0, 0)
-    FONT_SIZE: int = 20
-    
-    # Game speed increase interval
-    SPEED_INCREASE_INTERVAL: int = 100
+    SCREEN_WIDTH = 1100
+    SCREEN_HEIGHT = 600
+    INITIAL_GAME_SPEED = 20
+    Y_POS_BG = 380
+    SPEED_INCREASE_INTERVAL = 100
+    FONT_COLOR = (0, 0, 0)
+    FONT_SIZE = 20
     
     @classmethod
     def get_background_color(cls) -> tuple[int, int, int]:

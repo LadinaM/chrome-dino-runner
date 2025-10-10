@@ -1,7 +1,7 @@
 import os
 import pygame
 
-# Game assets configuration
+
 def load_game_assets():
     """Load all game assets and return them as a dictionary"""
     
