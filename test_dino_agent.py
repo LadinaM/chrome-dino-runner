@@ -1,117 +1,81 @@
-# test_dino_agent.py
-import os
 import argparse
-import logging
 import numpy as np
+import torch
 
-from stable_baselines3 import PPO
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from torch.serialization import add_safe_globals
 
 from chrome_dino_env import ChromeDinoEnv
-
-# ---------------- Logging ----------------
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-logging.getLogger("stable_baselines3").setLevel(logging.INFO)
+from train_dino_agent import PPO_Model, ObsNorm
 
 
-def build_eval_env(seed: int, render_mode: str, vecnorm_path: str | None):
-    """
-    Build an evaluation env.
-    If vecnorm_path exists, wrap env with VecNormalize.load(...), set to eval mode.
-    """
-    if render_mode not in ("human", None):
-        raise ValueError(f"Unsupported render_mode '{render_mode}'. "
-                         f"Use 'human' for display or None for headless mode.")
-    make_raw = lambda: Monitor(ChromeDinoEnv(render_mode=render_mode, seed=seed))
-    raw_env = DummyVecEnv([make_raw])
+def load_checkpoint(path: str, obs_dim: int, act_dim: int, device: str = "cpu"):
+    # 1) Load (trusted local ckpt)
 
-    if vecnorm_path and os.path.isfile(vecnorm_path):
-        logger.info(f"Loading VecNormalize stats from: {vecnorm_path}")
-        vec_env = VecNormalize.load(vecnorm_path, raw_env)
-        vec_env.training = False
-        vec_env.norm_reward = False
-        return vec_env
-    if vecnorm_path:
-        logger.warning(f"VecNormalize stats not found at '{vecnorm_path}'. "
-                           f"Continuing WITHOUT normalization. "
-                           f"(If you trained with VecNormalize, expect a performance drop.)")
-        user_input = input("Do you want to continue? [y/N] ")
-        if user_input.lower() == "y":
-            return raw_env
-        raise RuntimeError("VecNormalize stats not found at '{vecnorm_path}' and user doesn't want to continue.")
+    add_safe_globals([np.core.multiarray._reconstruct])  # keep if weights_only=True path is used anywhere
+    data = torch.load(path, map_location=device, weights_only=False)
+
+    hidden = data.get("cfg", {}).get("hidden", 128)
+    model = PPO_Model(obs_dim, act_dim, hidden=hidden).to(device)
+
+    # 2) Handle torch.compile state dicts
+    state_dict = data["model_state_dict"]
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        state_dict = {k.replace("_orig_mod.", "", 1): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # 3) Rebuild obs_norm if present (supports lists or numpy)
+    obs_norm = None
+    on = data.get("obs_norm")
+    if on is not None:
+        obs_norm = ObsNorm(obs_dim)
+        obs_norm.mean = np.array(on["mean"], dtype=np.float64)
+        obs_norm.var  = np.array(on["var"],  dtype=np.float64)
+        obs_norm.count = float(on["count"])
+        obs_norm.clip  = float(on["clip"])
+
+    return model, obs_norm, data.get("cfg", {})
 
 
-def run_eval(model_path: str,
-             vecnorm_path: str | None = "vecnorm_stats.pkl",
-             seed: int = 42,
-             episodes: int = 5,
-             deterministic: bool = True,
-             render_human: bool = True):
-    """
-    Load model and evaluate for N episodes.
-    """
-    # Load the SB3 PPO model
-    if not os.path.isfile(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    logger.info(f"Loading model from: {model_path}")
-    model = PPO.load(model_path, device="auto")
 
-    render_mode = "human" if render_human else None
-    env = build_eval_env(seed=seed + 123, render_mode=render_mode, vecnorm_path=vecnorm_path)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", type=str, default="./dino_ppo.pt")
+    ap.add_argument("--episodes", type=int, default=5)
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    args = ap.parse_args()
 
-    logger.info("Starting evaluation...")
-    total_reward = 0.0
-    finished = 0
+    # Human render env
+    env = ChromeDinoEnv(render_mode="human", seed=123)
+    obs, _ = env.reset()
+    obs_dim = obs.shape[-1]
+    act_dim = env.action_space.n
 
-    obs = env.reset()
+    model, obs_norm, cfg = load_checkpoint(args.model, obs_dim, act_dim, device=args.device)
 
-    while finished < episodes:
-        action, _ = model.predict(obs, deterministic=deterministic)
-        obs, rewards, dones, infos = env.step(action)
+    for ep in range(args.episodes):
+        obs, _ = env.reset()
+        done = False
+        ep_ret = 0.0
+        while not done:
+            if obs_norm is not None:
+                obs = obs_norm.normalize(obs)
 
-        # rewards is a vector of shape (n_envs,). We have n_envs=1 here.
-        total_reward += float(np.mean(rewards))
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=args.device).unsqueeze(0)
+            with torch.no_grad():
+                logits, _ = model.forward(obs_t)
+                dist = torch.distributions.Categorical(logits=logits)
+                action = dist.probs.argmax(dim=-1)  # greedy
+                action = int(action.item())
 
-        if dones.any():
-            # infos is a list of dicts for VecEnv
-            info0 = infos[0] if isinstance(infos, (list, tuple)) else infos
-            ep_score = info0.get("score", None)
-            if ep_score is not None:
-                logger.info(f"Episode {finished + 1} finished with score: {ep_score}")
-            else:
-                logger.info(f"Episode {finished + 1} finished.")
-            finished += 1
-            # reset handled automatically by VecEnv when dones.any() is True
+            obs, r, terminated, truncated, info = env.step(action)
+            ep_ret += float(r)
+            done = terminated or truncated
 
+        print(f"[Episode {ep+1}] return={ep_ret:.1f} score={info.get('score', 'n/a')}")
     env.close()
-    logger.info(f"Finished {episodes} episodes. "
-                f"Total reward (mean across vec steps): {total_reward:.2f}")
-
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Evaluate a trained Dino PPO agent.")
-    p.add_argument("--model_path", type=str, default="dino_final_model.zip",
-                   help="Path to the saved model (.zip).")
-    p.add_argument("--vecnorm_path", type=str, default="vecnorm_stats.pkl",
-                   help="Path to VecNormalize stats file. Leave as default if you trained with VecNormalize.")
-    p.add_argument("--seed", type=int, default=42, help="Base seed for eval env.")
-    p.add_argument("--episodes", type=int, default=5, help="Number of evaluation episodes.")
-    p.add_argument("--stochastic", action="store_true",
-                   help="Use stochastic actions (default: deterministic).")
-    p.add_argument("--no_render", action="store_true",
-                   help="Do not render (headless eval).")
-    return p.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    run_eval(
-        model_path=args.model_path,
-        vecnorm_path=args.vecnorm_path if args.vecnorm_path else None,
-        seed=args.seed,
-        episodes=args.episodes,
-        deterministic=not args.stochastic,
-        render_human=not args.no_render,
-    )
+    main()

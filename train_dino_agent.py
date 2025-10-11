@@ -1,154 +1,374 @@
+import argparse
+import math
 import os
-import logging
-from typing import Callable, List
+import random
+import time
+from dataclasses import dataclass
+from typing import Callable
 
+import gymnasium as gym
 import numpy as np
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, CallbackList, BaseCallback
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-from stable_baselines3.common.utils import set_random_seed
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
+from gymnasium.wrappers import RecordEpisodeStatistics
 
 from chrome_dino_env import ChromeDinoEnv
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logging.getLogger("stable_baselines3").setLevel(logging.INFO)
 
-SEED = 42
-N_ENVS = 8  # increase if CPU allows (e.g., 8)
-TOTAL_TIMESTEPS = 1_000_000
-EVAL_FREQ = 10_000
-N_EVAL_EPISODES = 5
+# ----------------------------
+# Utilities
+# ----------------------------
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
-def make_env(rank: int) -> Callable[[], Monitor]:
+
+class ObsNorm:
     """
-    Utility to create a thunk that builds a single Monitor-wrapped env.
+    Simple observation normalizer (running mean/var).
     """
-    def _init():
-        env = ChromeDinoEnv(render_mode=None, seed=SEED + rank)
-        env = Monitor(env)
+    def __init__(self, shape, eps: float = 1e-8, clip: float = 10.0):
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.var = np.ones(shape, dtype=np.float64)
+        self.count = eps
+        self.clip = clip
+
+    def update(self, x: np.ndarray):
+        if x.ndim == 1:
+            x = x[None, :]
+        batch_mean = x.mean(axis=0)
+        batch_var = x.var(axis=0)
+        batch_count = x.shape[0]
+        self._update_from_moments(batch_mean, batch_var, batch_count)
+
+    def _update_from_moments(self, mean, var, count):
+        delta = mean - self.mean
+        tot = self.count + count
+        new_mean = self.mean + delta * count / tot
+        m_a = self.var * self.count
+        m_b = var * count
+        M2 = m_a + m_b + delta**2 * self.count * count / tot
+        new_var = M2 / tot
+        self.mean, self.var, self.count = new_mean, new_var, tot
+
+    def normalize(self, x: np.ndarray) -> np.ndarray:
+        x = (x - self.mean) / (np.sqrt(self.var) + 1e-8)
+        return np.clip(x, -self.clip, self.clip)
+
+
+def make_env(rank: int, seed: int, render_mode=None) -> Callable[[], gym.Env]:
+    def _thunk():
+        env = ChromeDinoEnv(render_mode=render_mode, seed=seed + rank)
+        env = RecordEpisodeStatistics(env, deque_size=1000)
         return env
-    return _init
+    return _thunk
 
-def linear_lr(initial_lr: float):
-    """
-    Linear LR schedule: lr = initial_lr * (1 - progress_remaining)
-    """
-    def _lr(progress_remaining: float) -> float:
-        return initial_lr * progress_remaining
-    return _lr
 
-class SyncVecNormalizeCallback(BaseCallback):
-    """
-    Ensures eval VecNormalize uses the latest obs_rms from the training VecNormalize
-    right before each evaluation happens.
-    Set sync_freq equal to EVAL_FREQ to sync just-in-time for EvalCallback.
-    """
-    def __init__(self, train_vecnorm: VecNormalize, eval_vecnorm: VecNormalize, sync_freq: int):
+# ----------------------------
+# Model
+# ----------------------------
+class PPO_Model(nn.Module):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
         super().__init__()
-        self.train_vecnorm = train_vecnorm
-        self.eval_vecnorm = eval_vecnorm
-        self.sync_freq = sync_freq
+        self.policy = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, act_dim),
+        )
+        self.value = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, 1),
+        )
 
-    def _on_step(self) -> bool:
-        if self.n_calls % self.sync_freq == 0:
-            self.eval_vecnorm.obs_rms = self.train_vecnorm.obs_rms
-        return True
+    def forward(self, x):
+        logits = self.policy(x)
+        value = self.value(x).squeeze(-1)
+        return logits, value
+
+    def act(self, x):
+        logits, value = self.forward(x)
+        dist = torch.distributions.Categorical(logits=logits)
+        action = dist.sample()
+        logp = dist.log_prob(action)
+        return action, logp, value
+
+    def eval_actions(self, x, actions):
+        logits, value = self.forward(x)
+        dist = torch.distributions.Categorical(logits=logits)
+        logp = dist.log_prob(actions)
+        entropy = dist.entropy()
+        return logp, entropy, value
 
 
-def main():
-    set_random_seed(SEED)
+# ----------------------------
+# PPO training loop
+# ----------------------------
+@dataclass
+class PPOConfig:
+    seed: int = 42
+    total_timesteps: int = 1_000_000
+    n_envs: int = 4
+    n_steps: int = 2048         # per env
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    update_epochs: int = 10
+    clip_coef: float = 0.2
+    vf_clip_coef: float = 0.2
+    ent_coef: float = 0.01
+    vf_coef: float = 0.5
+    max_grad_norm: float = 0.5
+    lr: float = 3e-4
+    linear_lr: bool = True
+    hidden: int = 128
+    torch_compile: bool = False
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    norm_obs: bool = True
+    log_dir: str = "./pt_logs"
+    save_path: str = "./dino_ppo.pt"
+    vec_backend: str = "async"  # "sync" or "async"
+    minibatch_size: int = 64
 
-    # ----- Training env(s)
-    if N_ENVS > 1:
-        train_vec = SubprocVecEnv([make_env(i) for i in range(N_ENVS)])
+
+def ppo_train(cfg: PPOConfig):
+    set_seed(cfg.seed)
+    os.makedirs(cfg.log_dir, exist_ok=True)
+
+    # ---- Vectorized envs (Gymnasium API)
+    if cfg.vec_backend == "async" and cfg.n_envs > 1:
+        envs = AsyncVectorEnv([make_env(i, cfg.seed) for i in range(cfg.n_envs)])
     else:
-        train_vec = DummyVecEnv([make_env(0)])
+        envs = SyncVectorEnv([make_env(i, cfg.seed) for i in range(cfg.n_envs)])
+
+    # Reset: Gymnasium vector returns (obs, infos)
+    next_obs, _ = envs.reset(seed=cfg.seed)
+    # Shapes: obs -> (n_envs, obs_dim)
+    obs_dim = next_obs.shape[1]
+    act_dim = envs.single_action_space.n
+
+    # Optional obs normalization
+    obs_norm = ObsNorm(obs_dim) if cfg.norm_obs else None
+    if obs_norm is not None:
+        obs_norm.update(next_obs)
+        next_obs = obs_norm.normalize(next_obs)
+
+    # ---- Model
+    model = PPO_Model(obs_dim, act_dim, hidden=cfg.hidden).to(cfg.device)
+    if cfg.torch_compile:
+        model = torch.compile(model)
+
+    optimizer = optim.Adam(model.parameters(), lr=cfg.lr)
+    start_time = time.time()
+
+    # Storage
+    num_steps = cfg.n_steps
+    batch_size = cfg.n_envs * num_steps
+
+    obs_buf = np.zeros((num_steps, cfg.n_envs, obs_dim), dtype=np.float32)
+    act_buf = np.zeros((num_steps, cfg.n_envs), dtype=np.int64)
+    logp_buf = np.zeros((num_steps, cfg.n_envs), dtype=np.float32)
+    rew_buf = np.zeros((num_steps, cfg.n_envs), dtype=np.float32)
+    done_buf = np.zeros((num_steps, cfg.n_envs), dtype=np.float32)
+    val_buf = np.zeros((num_steps, cfg.n_envs), dtype=np.float32)
+
+    next_done = np.zeros((cfg.n_envs,), dtype=np.float32)
+
+    global_step = 0
+    updates = math.ceil(cfg.total_timesteps / batch_size)
+
+    for update in range(1, updates + 1):
+        # LR schedule
+        if cfg.linear_lr:
+            frac = 1.0 - (update - 1) / updates
+            for pg in optimizer.param_groups:
+                pg["lr"] = cfg.lr * frac
+
+        # Collect rollout
+        for step in range(num_steps):
+            global_step += cfg.n_envs
+            obs_buf[step] = next_obs
+
+            # torch forward on device
+            obs_t = torch.as_tensor(next_obs, device=cfg.device, dtype=torch.float32)
+            with torch.no_grad():
+                action_t, logp_t, value_t = model.act(obs_t)
+            action_np = action_t.cpu().numpy()
+            logp_np = logp_t.cpu().numpy()
+            value_np = value_t.cpu().numpy()
+
+            act_buf[step] = action_np
+            logp_buf[step] = logp_np
+            val_buf[step] = value_np
+            done_buf[step] = next_done
+
+            # Vector step (Gymnasium vector API)
+            next_obs, rewards, terminations, truncations, infos = envs.step(action_np)
+            dones = np.logical_or(terminations, truncations).astype(np.float32)
+            rew_buf[step] = rewards
+
+            # Episode logging via final_info
+            # Gymnasium vector auto-resets and provides final stats in infos["final_info"]
+            final_infos = infos.get("final_info", None)
+            if final_infos is not None:
+                for fi in final_infos:
+                    if fi is not None and "episode" in fi:
+                        ep_r = float(np.asarray(fi["episode"]["r"]).item())
+                        ep_l = int(np.asarray(fi["episode"]["l"]).item())
+                        print(f"[{global_step}] ep_return={ep_r:.1f} ep_len={ep_l}")
+
+            if obs_norm is not None:
+                obs_norm.update(next_obs)
+                next_obs = obs_norm.normalize(next_obs)
+
+            next_done = dones
+
+        # Compute advantages with GAE(λ)
+        with torch.no_grad():
+            next_obs_t = torch.as_tensor(next_obs, device=cfg.device, dtype=torch.float32)
+            _, next_value_t = model.forward(next_obs_t)
+            next_value = next_value_t.cpu().numpy()
+
+        adv_buf = np.zeros_like(rew_buf)
+        lastgaelam = np.zeros((cfg.n_envs,), dtype=np.float32)
+        for t in reversed(range(num_steps)):
+            not_done = 1.0 - done_buf[t]
+            delta = rew_buf[t] + cfg.gamma * next_value * not_done - val_buf[t]
+            lastgaelam = delta + cfg.gamma * cfg.gae_lambda * not_done * lastgaelam
+            adv_buf[t] = lastgaelam
+            next_value = val_buf[t]
+
+        ret_buf = adv_buf + val_buf
+
+        # Flatten rollout
+        b_obs = torch.as_tensor(obs_buf.reshape(batch_size, obs_dim), device=cfg.device)
+        b_actions = torch.as_tensor(act_buf.reshape(batch_size), device=cfg.device)
+        b_logp_old = torch.as_tensor(logp_buf.reshape(batch_size), device=cfg.device)
+        b_adv = torch.as_tensor(adv_buf.reshape(batch_size), device=cfg.device)
+        b_ret = torch.as_tensor(ret_buf.reshape(batch_size), device=cfg.device)
+        b_val_old = torch.as_tensor(val_buf.reshape(batch_size), device=cfg.device)
+
+        # Advantage norm
+        b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
+
+        # Update policy for several epochs
+        inds = np.arange(batch_size)
+        mb = cfg.minibatch_size
+        for epoch in range(cfg.update_epochs):
+            np.random.shuffle(inds)
+            for start in range(0, batch_size, mb):
+                end = start + mb
+                mb_inds = inds[start:end]
+
+                logits, value = model.forward(b_obs[mb_inds])
+                dist = torch.distributions.Categorical(logits=logits)
+                logp = dist.log_prob(b_actions[mb_inds])
+                entropy = dist.entropy().mean()
+
+                # Ratio for clipped surrogate
+                ratio = torch.exp(logp - b_logp_old[mb_inds])
+                surr1 = ratio * b_adv[mb_inds]
+                surr2 = torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef) * b_adv[mb_inds]
+                policy_loss = -torch.min(surr1, surr2).mean()
+
+                # Value loss (with optional clip)
+                if cfg.vf_clip_coef > 0:
+                    v_clipped = b_val_old[mb_inds] + (value - b_val_old[mb_inds]).clamp(-cfg.vf_clip_coef, cfg.vf_clip_coef)
+                    v_loss_unclipped = (value - b_ret[mb_inds])**2
+                    v_loss_clipped = (v_clipped - b_ret[mb_inds])**2
+                    value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                else:
+                    value_loss = 0.5 * (b_ret[mb_inds] - value).pow(2).mean()
+
+                loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                optimizer.step()
+
+        # simple checkpointing
+        if update % 10 == 0 or update == updates:
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "cfg": vars(cfg),
+                    "obs_norm": None if obs_norm is None else {
+                        "mean": obs_norm.mean,
+                        "var": obs_norm.var,
+                        "count": obs_norm.count,
+                        "clip": obs_norm.clip
+                    }
+                },
+                cfg.save_path
+            )
+            elapsed = time.time() - start_time
+            print(f"[update {update}/{updates}] saved to {cfg.save_path} | elapsed={elapsed/60:.1f} min")
+
+    envs.close()
+    print("Training done.")
 
 
-    # Wrap with VecNormalize for obs/reward normalization
-    train_env = VecNormalize(
-        train_vec,
-        norm_obs=True,
-        norm_reward=True,
-        clip_obs=10.0,
-        clip_reward=10.0,
-        gamma=0.99,
+# ----------------------------
+# CLI
+# ----------------------------
+def parse_args() -> PPOConfig:
+    p = argparse.ArgumentParser()
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--total-timesteps", type=int, default=1_000_000)
+    p.add_argument("--n-envs", type=int, default=4)
+    p.add_argument("--n-steps", type=int, default=2048)
+    p.add_argument("--update-epochs", type=int, default=10)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--hidden", type=int, default=128)
+    p.add_argument("--clip-coef", type=float, default=0.2)
+    p.add_argument("--vf-clip-coef", type=float, default=0.2)
+    p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--vf-coef", type=float, default=0.5)
+    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--gae-lambda", type=float, default=0.95)
+    p.add_argument("--max-grad-norm", type=float, default=0.5)
+    p.add_argument("--torch-compile", action="store_true")
+    p.add_argument("--no-linear-lr", action="store_true")
+    p.add_argument("--no-norm-obs", action="store_true")
+    p.add_argument("--vec-backend", choices=["sync", "async"], default="async")
+    p.add_argument("--save-path", type=str, default="./dino_ppo.pt")
+    p.add_argument("--log-dir", type=str, default="./pt_logs")
+    p.add_argument("--minibatch-size", type=int, default=64)
+
+    a = p.parse_args()
+    return PPOConfig(
+        seed=a.seed,
+        total_timesteps=a.total_timesteps,
+        n_envs=a.n_envs,
+        n_steps=a.n_steps,
+        update_epochs=a.update_epochs,
+        lr=a.lr,
+        hidden=a.hidden,
+        clip_coef=a.clip_coef,
+        vf_clip_coef=a.vf_clip_coef,
+        ent_coef=a.ent_coef,
+        vf_coef=a.vf_coef,
+        gamma=a.gamma,
+        gae_lambda=a.gae_lambda,
+        max_grad_norm=a.max_grad_norm,
+        torch_compile=a.torch_compile,
+        linear_lr=not a.no_linear_lr,
+        norm_obs=not a.no_norm_obs,
+        vec_backend=a.vec_backend,
+        save_path=a.save_path,
+        log_dir=a.log_dir,
+        minibatch_size=a.minibatch_size,
     )
-    train_env.seed(SEED)
 
-    # ----- Evaluation env (MUST match wrapper type)
-    eval_raw = DummyVecEnv([make_env(10_000)])  # separate seed stream
-    eval_env = VecNormalize(
-        eval_raw,
-        training=False,          # <- important: eval mode
-        norm_obs=True,
-        norm_reward=False,       # don't normalize rewards for reporting
-        clip_obs=10.0,
-    )
-    # ---- Callbacks
-    os.makedirs("./best_model", exist_ok=True)
-    os.makedirs("./logs", exist_ok=True)
-    os.makedirs("./checkpoints", exist_ok=True)
-    os.makedirs("./tensorboard_logs", exist_ok=True)
-
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path="./best_model/",
-        log_path="./logs/",
-        eval_freq=EVAL_FREQ,
-        n_eval_episodes=N_EVAL_EPISODES,
-        deterministic=True,
-        render=False,
-        verbose=1,
-    )
-    checkpoint_callback = CheckpointCallback(
-        save_freq=50_000,
-        save_path="./checkpoints/",
-        name_prefix="dino_model",
-        save_replay_buffer=False,
-        save_vecnormalize=True  # save VecNormalize with checkpoints
-    )
-    sync_callback = SyncVecNormalizeCallback(
-        train_vecnorm=train_env,
-        eval_vecnorm=eval_env,
-        sync_freq=EVAL_FREQ
-    )
-    callbacks = CallbackList([sync_callback, eval_callback, checkpoint_callback])
-
-    # ----- PPO model
-    policy_kwargs = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
-
-    model = PPO(
-        "MlpPolicy",
-        train_env,
-        verbose=1,
-        device="auto",
-        learning_rate=linear_lr(3e-4),
-        n_steps=2048,  # per env; effective batch = n_steps * n_envs
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        clip_range_vf=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        target_kl=0.03,
-        tensorboard_log="./tensorboard_logs/",
-        policy_kwargs=policy_kwargs,
-        seed=SEED,
-    )
-
-    # ---- Train
-    logger.info("Starting training...")
-    total_ts = 1_000_000  # consider 1–3M for reliable mastery
-    model.learn(total_timesteps=total_ts, callback=callbacks)
-
-    # Save model and VecNormalize statistics
-    model.save("dino_final_model")
-    train_env.save("vecnorm_stats.pkl")
 
 if __name__ == "__main__":
-    main()
+    cfg = parse_args()
+    ppo_train(cfg)
