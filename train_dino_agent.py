@@ -1,77 +1,30 @@
 import argparse
+import logging
 import math
 import os
-import random
 import time
+import warnings
 from dataclasses import dataclass
-from typing import Callable
 
-import gymnasium as gym
+from utilities.helpers import make_env
+from utilities.observations import set_seed, ObsNorm
+
+warnings.filterwarnings("ignore", module="pygame.pkgdata")
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
-from gymnasium.wrappers import RecordEpisodeStatistics
 
-from chrome_dino_env import ChromeDinoEnv
-
-
-# ----------------------------
-# Utilities
-# ----------------------------
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-class ObsNorm:
-    """
-    Simple observation normalizer (running mean/var).
-    """
-    def __init__(self, shape, eps: float = 1e-8, clip: float = 10.0):
-        self.mean = np.zeros(shape, dtype=np.float64)
-        self.var = np.ones(shape, dtype=np.float64)
-        self.count = eps
-        self.clip = clip
-
-    def update(self, x: np.ndarray):
-        if x.ndim == 1:
-            x = x[None, :]
-        batch_mean = x.mean(axis=0)
-        batch_var = x.var(axis=0)
-        batch_count = x.shape[0]
-        self._update_from_moments(batch_mean, batch_var, batch_count)
-
-    def _update_from_moments(self, mean, var, count):
-        delta = mean - self.mean
-        tot = self.count + count
-        new_mean = self.mean + delta * count / tot
-        m_a = self.var * self.count
-        m_b = var * count
-        M2 = m_a + m_b + delta**2 * self.count * count / tot
-        new_var = M2 / tot
-        self.mean, self.var, self.count = new_mean, new_var, tot
-
-    def normalize(self, x: np.ndarray) -> np.ndarray:
-        x = (x - self.mean) / (np.sqrt(self.var) + 1e-8)
-        return np.clip(x, -self.clip, self.clip)
-
-
-def make_env(rank: int, seed: int, render_mode=None) -> Callable[[], gym.Env]:
-    def _thunk():
-        env = ChromeDinoEnv(render_mode=render_mode, seed=seed + rank)
-        env = RecordEpisodeStatistics(env, deque_size=1000)
-        return env
-    return _thunk
-
-
-# ----------------------------
-# Model
-# ----------------------------
-class PPO_Model(nn.Module):
+class PpoModel(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
         super().__init__()
         self.policy = nn.Sequential(
@@ -109,9 +62,6 @@ class PPO_Model(nn.Module):
         return logp, entropy, value
 
 
-# ----------------------------
-# PPO training loop
-# ----------------------------
 @dataclass
 class PPOConfig:
     seed: int = 42
@@ -142,7 +92,7 @@ def ppo_train(cfg: PPOConfig):
     set_seed(cfg.seed)
     os.makedirs(cfg.log_dir, exist_ok=True)
 
-    # ---- Vectorized envs (Gymnasium API)
+    # ---- Vectorized envs
     if cfg.vec_backend == "async" and cfg.n_envs > 1:
         envs = AsyncVectorEnv([make_env(i, cfg.seed) for i in range(cfg.n_envs)])
     else:
@@ -161,7 +111,7 @@ def ppo_train(cfg: PPOConfig):
         next_obs = obs_norm.normalize(next_obs)
 
     # ---- Model
-    model = PPO_Model(obs_dim, act_dim, hidden=cfg.hidden).to(cfg.device)
+    model = PpoModel(obs_dim, act_dim, hidden=cfg.hidden).to(cfg.device)
     if cfg.torch_compile:
         model = torch.compile(model)
 
@@ -222,7 +172,7 @@ def ppo_train(cfg: PPOConfig):
                     if fi is not None and "episode" in fi:
                         ep_r = float(np.asarray(fi["episode"]["r"]).item())
                         ep_l = int(np.asarray(fi["episode"]["l"]).item())
-                        print(f"[{global_step}] ep_return={ep_r:.1f} ep_len={ep_l}")
+                        logger.info(f"[{global_step}] ep_return={ep_r:6.1f}  ep_len={ep_l:>4}")
 
             if obs_norm is not None:
                 obs_norm.update(next_obs)
@@ -296,24 +246,23 @@ def ppo_train(cfg: PPOConfig):
 
         # simple checkpointing
         if update % 10 == 0 or update == updates:
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "cfg": vars(cfg),
-                    "obs_norm": None if obs_norm is None else {
-                        "mean": obs_norm.mean,
-                        "var": obs_norm.var,
-                        "count": obs_norm.count,
-                        "clip": obs_norm.clip
-                    }
+            to_save = model._orig_mod if hasattr(model, "_orig_mod") else model
+            payload = {
+                "model_state_dict": to_save.state_dict(),
+                "cfg": vars(cfg),
+                "obs_norm": None if obs_norm is None else {
+                    "mean": obs_norm.mean.tolist(),
+                    "var": obs_norm.var.tolist(),
+                    "count": float(obs_norm.count),
+                    "clip": float(obs_norm.clip),
                 },
-                cfg.save_path
-            )
-            elapsed = time.time() - start_time
-            print(f"[update {update}/{updates}] saved to {cfg.save_path} | elapsed={elapsed/60:.1f} min")
+            }
+            torch.save(payload, cfg.save_path)
 
+            elapsed = time.time() - start_time
+            logger.info(f"[update {update}/{updates}] saved to {cfg.save_path} | elapsed={elapsed/60:.1f} min")
     envs.close()
-    print("Training done.")
+    logger.info("Training done.")
 
 
 # ----------------------------

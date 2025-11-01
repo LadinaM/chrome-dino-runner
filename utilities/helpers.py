@@ -1,0 +1,28 @@
+import gymnasium as gym
+
+from typing import Callable
+
+from gymnasium.wrappers import RecordEpisodeStatistics
+
+from chrome_dino_env import ChromeDinoEnv
+
+
+def get_high_score():
+    """Read the high score from score.txt file"""
+    try:
+        with open("score.txt", "r") as f:
+            content = f.read().strip()
+            if content:
+                score_ints = [int(x) for x in content.split()]
+                return max(score_ints)
+            else:
+                return 0
+    except (FileNotFoundError, ValueError):
+        return 0
+
+def make_env(rank: int, seed: int, render_mode=None) -> Callable[[], gym.Env]:
+    def _thunk():
+        env = ChromeDinoEnv(render_mode=render_mode, seed=seed + rank)
+        env = RecordEpisodeStatistics(env, deque_size=1000)
+        return env
+    return _thunk

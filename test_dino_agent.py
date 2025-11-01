@@ -1,21 +1,34 @@
 import argparse
+import logging
 import numpy as np
 import torch
+
+import warnings
+warnings.filterwarnings("ignore", module="pygame.pkgdata")  # okay because version of pygame is pinned
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 from torch.serialization import add_safe_globals
 
 from chrome_dino_env import ChromeDinoEnv
-from train_dino_agent import PPO_Model, ObsNorm
+from train_dino_agent import PpoModel
+from utilities.observations import ObsNorm
 
 
 def load_checkpoint(path: str, obs_dim: int, act_dim: int, device: str = "cpu"):
     # 1) Load (trusted local ckpt)
 
-    add_safe_globals([np.core.multiarray._reconstruct])  # keep if weights_only=True path is used anywhere
+    add_safe_globals([np._core.multiarray._reconstruct])  # keep if weights_only=True path is used anywhere
     data = torch.load(path, map_location=device, weights_only=False)
 
     hidden = data.get("cfg", {}).get("hidden", 128)
-    model = PPO_Model(obs_dim, act_dim, hidden=hidden).to(device)
+    model = PpoModel(obs_dim, act_dim, hidden=hidden).to(device)
 
     # 2) Handle torch.compile state dicts
     state_dict = data["model_state_dict"]
@@ -73,7 +86,8 @@ def main():
             ep_ret += float(r)
             done = terminated or truncated
 
-        print(f"[Episode {ep+1}] return={ep_ret:.1f} score={info.get('score', 'n/a')}")
+        score = info.get('score', 'n/a')
+        logger.info(f"[Episode {ep+1}] return={ep_ret:6.1f}  score={score:>4}")
     env.close()
 
 
