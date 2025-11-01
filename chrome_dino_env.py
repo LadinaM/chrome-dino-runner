@@ -286,6 +286,12 @@ class ChromeDinoEnv(gym.Env):
 
     def _render_frame(self):
         self._fill_bg()
+        # Draw the ground background
+        bg = self.ASSETS["BG"]
+        w = bg.get_width()
+        self.SCREEN.blit(bg, (self.game_state.x_pos_bg, GameSettings.Y_POS_BG))
+        self.SCREEN.blit(bg, (self.game_state.x_pos_bg + w, GameSettings.Y_POS_BG))
+        # Draw player and obstacles
         self.player.draw(self.SCREEN)
         for obstacle in self.game_state.obstacles:
             obstacle.draw(self.SCREEN)
