@@ -3,9 +3,6 @@ import random
 import numpy as np
 import torch
 
-import torch.optim as optim
-from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
-from gymnasium.wrappers import RecordEpisodeStatistics
 
 
 def set_seed(seed: int):

@@ -51,11 +51,15 @@ chrome-dino-runner/
 ├── game/                  # Shared game settings and utilities
 │   ├── __init__.py        # Package initialization
 │   └── settings.py        # Shared game settings, state, and rendering
-├── helpers.py             # Utility functions
+├── utilities/             # Helpers
+    ├── helpers.py         # Utility functions
+    ├── constants.py       # Helper classes
+    └── observations.py    # Observation normalizer and seed setter
 ├── chrome_dino.py         # Main game using shared settings
 ├── chrome_dino_env.py     # RL environment
 ├── train_dino_agent.py    # Training script
 ├── test_env.py            # Environment testing script
+├── dino_ppo.pt            # 
 ├── requirements.txt       # Python dependencies
 └── README.md              # Project documentation
 ```

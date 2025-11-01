@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
+from torch.utils.tensorboard import SummaryWriter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,6 +93,9 @@ def ppo_train(cfg: PPOConfig):
     set_seed(cfg.seed)
     os.makedirs(cfg.log_dir, exist_ok=True)
 
+    # Initialize TensorBoard writer
+    tb_writer = SummaryWriter(log_dir=cfg.log_dir)
+
     # ---- Vectorized envs
     if cfg.vec_backend == "async" and cfg.n_envs > 1:
         envs = AsyncVectorEnv([make_env(i, cfg.seed) for i in range(cfg.n_envs)])
@@ -133,6 +137,7 @@ def ppo_train(cfg: PPOConfig):
 
     global_step = 0
     updates = math.ceil(cfg.total_timesteps / batch_size)
+    episode_count = 0
 
     for update in range(1, updates + 1):
         # LR schedule
@@ -173,6 +178,13 @@ def ppo_train(cfg: PPOConfig):
                         ep_r = float(np.asarray(fi["episode"]["r"]).item())
                         ep_l = int(np.asarray(fi["episode"]["l"]).item())
                         logger.info(f"[{global_step}] ep_return={ep_r:6.1f}  ep_len={ep_l:>4}")
+                        
+                        # Log episode metrics to TensorBoard
+                        episode_count += 1
+                        tb_writer.add_scalar("episode/return", ep_r, episode_count)
+                        tb_writer.add_scalar("episode/length", ep_l, episode_count)
+                        tb_writer.add_scalar("episode/return_vs_step", ep_r, global_step)
+                        tb_writer.add_scalar("episode/length_vs_step", ep_l, global_step)
 
             if obs_norm is not None:
                 obs_norm.update(next_obs)
@@ -211,6 +223,12 @@ def ppo_train(cfg: PPOConfig):
         # Update policy for several epochs
         inds = np.arange(batch_size)
         mb = cfg.minibatch_size
+        
+        # Track metrics for logging
+        epoch_policy_losses = []
+        epoch_value_losses = []
+        epoch_entropies = []
+        
         for epoch in range(cfg.update_epochs):
             np.random.shuffle(inds)
             for start in range(0, batch_size, mb):
@@ -244,6 +262,36 @@ def ppo_train(cfg: PPOConfig):
                 nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                 optimizer.step()
 
+                # Accumulate metrics for logging
+                epoch_policy_losses.append(policy_loss.item())
+                epoch_value_losses.append(value_loss.item())
+                epoch_entropies.append(entropy.item())
+
+        # Log training metrics to TensorBoard
+        if epoch_policy_losses:
+            avg_policy_loss = np.mean(epoch_policy_losses)
+            avg_value_loss = np.mean(epoch_value_losses)
+            avg_entropy = np.mean(epoch_entropies)
+            current_lr = optimizer.param_groups[0]["lr"]
+            
+            tb_writer.add_scalar("train/policy_loss", avg_policy_loss, global_step)
+            tb_writer.add_scalar("train/value_loss", avg_value_loss, global_step)
+            tb_writer.add_scalar("train/entropy", avg_entropy, global_step)
+            tb_writer.add_scalar("train/learning_rate", current_lr, global_step)
+            tb_writer.add_scalar("train/update", update, global_step)
+            
+            # Log advantage statistics
+            tb_writer.add_scalar("train/advantage_mean", b_adv.mean().item(), global_step)
+            tb_writer.add_scalar("train/advantage_std", b_adv.std().item(), global_step)
+            
+            # Log value statistics
+            tb_writer.add_scalar("train/value_mean", b_val_old.mean().item(), global_step)
+            
+            # Log reward statistics from rollout
+            tb_writer.add_scalar("rollout/reward_mean", rew_buf.mean(), global_step)
+            tb_writer.add_scalar("rollout/reward_sum", rew_buf.sum(), global_step)
+            tb_writer.add_scalar("rollout/return_mean", ret_buf.mean(), global_step)
+
         # simple checkpointing
         if update % 10 == 0 or update == updates:
             to_save = model._orig_mod if hasattr(model, "_orig_mod") else model
@@ -261,7 +309,13 @@ def ppo_train(cfg: PPOConfig):
 
             elapsed = time.time() - start_time
             logger.info(f"[update {update}/{updates}] saved to {cfg.save_path} | elapsed={elapsed/60:.1f} min")
+            
+            # Log timing metrics
+            tb_writer.add_scalar("time/elapsed_minutes", elapsed / 60, global_step)
+            tb_writer.add_scalar("time/steps_per_second", global_step / elapsed, global_step)
+    
     envs.close()
+    tb_writer.close()
     logger.info("Training done.")
 
 
