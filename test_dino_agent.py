@@ -5,6 +5,8 @@ import torch
 
 import warnings
 warnings.filterwarnings("ignore", module="pygame.pkgdata")  # okay because version of pygame is pinned
+warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")
 
 
 logging.basicConfig(

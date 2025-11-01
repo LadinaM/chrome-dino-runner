@@ -10,6 +10,8 @@ from utilities.helpers import make_env
 from utilities.observations import set_seed, ObsNorm
 
 warnings.filterwarnings("ignore", module="pygame.pkgdata")
+warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")
 
 import numpy as np
 import torch
