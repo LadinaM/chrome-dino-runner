@@ -3,7 +3,8 @@ import threading
 
 import pygame
 
-from helpers import get_high_score, MovementType
+from utilities.helpers import get_high_score
+from utilities.constants import MovementType
 from game import GameSettings, GameState, GameObjects, GameRenderer, GameInitializer
 
 # Initialize pygame and create screen

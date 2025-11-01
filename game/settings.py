@@ -5,7 +5,7 @@ from figures.dinosaur import Dinosaur
 from figures.cloud import Cloud
 from figures.obstacles import SmallCactus, LargeCactus, Bird
 from figures.configurations import load_game_assets
-from helpers import MovementType, AssetClass
+from utilities.constants import MovementType, AssetClass
 
 
 class GameSettings:
