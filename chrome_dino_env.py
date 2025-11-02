@@ -36,6 +36,7 @@ class ChromeDinoEnv(gym.Env):
             milestone_points: int = 0,
             milestone_bonus: float = 0.0,  # small bonus
             death_penalty: float = -1.0,
+            speed_increases: bool = True,
             seed: Optional[int] = None
     ):
         super().__init__()
@@ -62,7 +63,7 @@ class ChromeDinoEnv(gym.Env):
                 logger.warning(f"Could not set window icon: {e}")
 
         # Initialize game state and player
-        self.game_state = GameState()
+        self.game_state = GameState(speed_increases=speed_increases)
         self.player = Dinosaur(self.ASSETS["RUNNING"], self.ASSETS["JUMPING"], self.ASSETS["DUCKING"])
 
         # Clock

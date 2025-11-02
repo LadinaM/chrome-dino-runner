@@ -20,9 +20,22 @@ def get_high_score():
     except (FileNotFoundError, ValueError):
         return 0
 
-def make_env(rank: int, seed: int, render_mode=None) -> Callable[[], gym.Env]:
+def make_env(
+    rank: int, 
+    seed: int, 
+    render_mode=None, 
+    speed_increases: bool = True,
+    alive_reward: float = 0.1,
+    death_penalty: float = -1.0
+) -> Callable[[], gym.Env]:
     def _thunk():
-        env = ChromeDinoEnv(render_mode=render_mode, seed=seed + rank)
+        env = ChromeDinoEnv(
+            render_mode=render_mode, 
+            seed=seed + rank, 
+            speed_increases=speed_increases,
+            alive_reward=alive_reward,
+            death_penalty=death_penalty
+        )
         env = RecordEpisodeStatistics(env, deque_size=1000)
         return env
     return _thunk

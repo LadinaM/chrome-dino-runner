@@ -89,6 +89,9 @@ class PPOConfig:
     save_path: str = "./dino_ppo.pt"
     vec_backend: str = "async"  # "sync" or "async"
     minibatch_size: int = 64
+    speed_increases: bool = True  # Whether game speed increases over time
+    alive_reward: float = 0.1  # Reward for staying alive per step
+    death_penalty: float = -1.0  # Penalty for dying
 
 
 def ppo_train(cfg: PPOConfig):
@@ -100,9 +103,17 @@ def ppo_train(cfg: PPOConfig):
 
     # ---- Vectorized envs
     if cfg.vec_backend == "async" and cfg.n_envs > 1:
-        envs = AsyncVectorEnv([make_env(i, cfg.seed) for i in range(cfg.n_envs)])
+        envs = AsyncVectorEnv([
+            make_env(i, cfg.seed, speed_increases=cfg.speed_increases, 
+                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty) 
+            for i in range(cfg.n_envs)
+        ])
     else:
-        envs = SyncVectorEnv([make_env(i, cfg.seed) for i in range(cfg.n_envs)])
+        envs = SyncVectorEnv([
+            make_env(i, cfg.seed, speed_increases=cfg.speed_increases,
+                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty) 
+            for i in range(cfg.n_envs)
+        ])
 
     # Reset: Gymnasium vector returns (obs, infos)
     next_obs, _ = envs.reset(seed=cfg.seed)
@@ -347,6 +358,9 @@ def parse_args() -> PPOConfig:
     p.add_argument("--save-path", type=str, default="./dino_ppo.pt")
     p.add_argument("--log-dir", type=str, default="./pt_logs")
     p.add_argument("--minibatch-size", type=int, default=64)
+    p.add_argument("--no-speed-increases", action="store_true", help="Disable game speed increases over time")
+    p.add_argument("--alive-reward", type=float, default=0.1, help="Reward for staying alive per step")
+    p.add_argument("--death-penalty", type=float, default=-1.0, help="Penalty for dying")
 
     a = p.parse_args()
     return PPOConfig(
@@ -371,6 +385,9 @@ def parse_args() -> PPOConfig:
         save_path=a.save_path,
         log_dir=a.log_dir,
         minibatch_size=a.minibatch_size,
+        speed_increases=not a.no_speed_increases,
+        alive_reward=a.alive_reward,
+        death_penalty=a.death_penalty,
     )
 
 

@@ -30,12 +30,13 @@ class GameSettings:
 class GameState:
     """Shared game state management"""
     
-    def __init__(self):
+    def __init__(self, speed_increases: bool = True):
         self.game_speed = GameSettings.INITIAL_GAME_SPEED
         self.x_pos_bg = 0
         self.y_pos_bg = GameSettings.Y_POS_BG
         self.points = 0
         self.obstacles = []
+        self.speed_increases = speed_increases
         
     def reset(self):
         """Reset game state to initial values"""
@@ -48,7 +49,7 @@ class GameState:
     def update_score(self):
         """Update score and game speed"""
         self.points += 1
-        if self.points % GameSettings.SPEED_INCREASE_INTERVAL == 0:
+        if self.speed_increases and self.points % GameSettings.SPEED_INCREASE_INTERVAL == 0:
             self.game_speed += 1
 
 class GameObjects:
