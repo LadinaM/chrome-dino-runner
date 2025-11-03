@@ -36,6 +36,7 @@ class ChromeDinoEnv(gym.Env):
             milestone_points: int = 0,
             milestone_bonus: float = 0.0,  # small bonus
             death_penalty: float = -1.0,
+            avoid_reward: float = 1.0,  # Reward for successfully avoiding an obstacle
             speed_increases: bool = True,
             seed: Optional[int] = None
     ):
@@ -77,6 +78,7 @@ class ChromeDinoEnv(gym.Env):
         # Rewards & rollout control
         self._alive_reward = float(alive_reward)
         self._death_penalty = float(death_penalty)
+        self._avoid_reward = float(avoid_reward)
         self._milestone_points = int(milestone_points)
         self._milestone_bonus = float(milestone_bonus)
         self._max_episode_steps = int(max_episode_steps)
@@ -85,6 +87,7 @@ class ChromeDinoEnv(gym.Env):
         # Bookkeeping
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)  # for vy finite diff
+        self._prev_obstacle_ids = set()  # Track obstacles from previous step for avoidance rewards
 
         # Seeding
         self.np_random, _ = seeding.np_random(seed)
@@ -138,6 +141,7 @@ class ChromeDinoEnv(gym.Env):
         self.player = Dinosaur(self.ASSETS["RUNNING"], self.ASSETS["JUMPING"], self.ASSETS["DUCKING"])
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)
+        self._prev_obstacle_ids = set()
 
         # Optional: clear screen for human mode
         self._fill_bg()
@@ -155,6 +159,10 @@ class ChromeDinoEnv(gym.Env):
         self._apply_action(action)
 
         for _ in range(self._frame_skip):
+            # Track obstacles before update for avoidance detection
+            dino_x_before = float(self.player.dino_rect.x)
+            obstacles_ahead_before = {id(o) for o in self.game_state.obstacles if o.rect.x >= dino_x_before}
+            
             # update player
             self._update_player()
 
@@ -167,6 +175,14 @@ class ChromeDinoEnv(gym.Env):
                 reward += self._death_penalty
                 break
 
+            # Reward for successfully avoiding obstacles (obstacle passed behind)
+            dino_x_after = float(self.player.dino_rect.x)
+            for ob in self.game_state.obstacles:
+                ob_id = id(ob)
+                # Obstacle was ahead before, now it's behind (passed successfully)
+                if ob_id in obstacles_ahead_before and ob.rect.x + ob.rect.width < dino_x_after:
+                    reward += self._avoid_reward
+
             # score and speed
             prev_points = self.game_state.points
             self.game_state.update_score()
@@ -178,6 +194,10 @@ class ChromeDinoEnv(gym.Env):
             if self.render_mode == "human":
                 self._render_frame()
                 self._pump_events()
+        
+        # Update obstacle tracking for next step (after all frame skips)
+        dino_x_final = float(self.player.dino_rect.x)
+        self._prev_obstacle_ids = {id(o) for o in self.game_state.obstacles if o.rect.x >= dino_x_final}
 
         # horizon truncation
         self._steps += 1

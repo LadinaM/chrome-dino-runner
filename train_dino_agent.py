@@ -70,18 +70,18 @@ class PPOConfig:
     seed: int = 42
     total_timesteps: int = 1_000_000
     n_envs: int = 4
-    n_steps: int = 2048         # per env
+    n_steps: int = 4096         # per env
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    update_epochs: int = 10
+    update_epochs: int = 8
     clip_coef: float = 0.2
     vf_clip_coef: float = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.1
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
-    lr: float = 3e-4
+    lr: float = 2e-4
     linear_lr: bool = True
-    hidden: int = 128
+    hidden: int = 256
     torch_compile: bool = False
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     norm_obs: bool = True
@@ -89,9 +89,12 @@ class PPOConfig:
     save_path: str = "./dino_ppo.pt"
     vec_backend: str = "async"  # "sync" or "async"
     minibatch_size: int = 64
-    speed_increases: bool = True  # Whether game speed increases over time
-    alive_reward: float = 0.1  # Reward for staying alive per step
-    death_penalty: float = -1.0  # Penalty for dying
+    speed_increases: bool = False  # Whether game speed increases over time
+    alive_reward: float = 0.2  # Reward for staying alive per step
+    death_penalty: float = -10.0  # Penalty for dying
+    avoid_reward: float = 5.0  # Reward for successfully avoiding an obstacle
+    milestone_points: int = 10  # Score threshold for milestone bonus
+    milestone_bonus: float = 5.0  # Bonus reward when reaching score milestones
 
 
 def ppo_train(cfg: PPOConfig):
@@ -105,13 +108,17 @@ def ppo_train(cfg: PPOConfig):
     if cfg.vec_backend == "async" and cfg.n_envs > 1:
         envs = AsyncVectorEnv([
             make_env(i, cfg.seed, speed_increases=cfg.speed_increases, 
-                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty) 
+                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty,
+                     avoid_reward=cfg.avoid_reward, milestone_points=cfg.milestone_points,
+                     milestone_bonus=cfg.milestone_bonus) 
             for i in range(cfg.n_envs)
         ])
     else:
         envs = SyncVectorEnv([
             make_env(i, cfg.seed, speed_increases=cfg.speed_increases,
-                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty) 
+                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty,
+                     avoid_reward=cfg.avoid_reward, milestone_points=cfg.milestone_points,
+                     milestone_bonus=cfg.milestone_bonus) 
             for i in range(cfg.n_envs)
         ])
 
@@ -336,31 +343,37 @@ def ppo_train(cfg: PPOConfig):
 # CLI
 # ----------------------------
 def parse_args() -> PPOConfig:
+    # Use PPOConfig as single source of truth for defaults
+    defaults = PPOConfig()
+    
     p = argparse.ArgumentParser()
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--total-timesteps", type=int, default=1_000_000)
-    p.add_argument("--n-envs", type=int, default=4)
-    p.add_argument("--n-steps", type=int, default=2048)
-    p.add_argument("--update-epochs", type=int, default=10)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--hidden", type=int, default=128)
-    p.add_argument("--clip-coef", type=float, default=0.2)
-    p.add_argument("--vf-clip-coef", type=float, default=0.2)
-    p.add_argument("--ent-coef", type=float, default=0.01)
-    p.add_argument("--vf-coef", type=float, default=0.5)
-    p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--gae-lambda", type=float, default=0.95)
-    p.add_argument("--max-grad-norm", type=float, default=0.5)
+    p.add_argument("--seed", type=int, default=defaults.seed)
+    p.add_argument("--total-timesteps", type=int, default=defaults.total_timesteps)
+    p.add_argument("--n-envs", type=int, default=defaults.n_envs)
+    p.add_argument("--n-steps", type=int, default=defaults.n_steps)
+    p.add_argument("--update-epochs", type=int, default=defaults.update_epochs)
+    p.add_argument("--lr", type=float, default=defaults.lr)
+    p.add_argument("--hidden", type=int, default=defaults.hidden)
+    p.add_argument("--clip-coef", type=float, default=defaults.clip_coef)
+    p.add_argument("--vf-clip-coef", type=float, default=defaults.vf_clip_coef)
+    p.add_argument("--ent-coef", type=float, default=defaults.ent_coef)
+    p.add_argument("--vf-coef", type=float, default=defaults.vf_coef)
+    p.add_argument("--gamma", type=float, default=defaults.gamma)
+    p.add_argument("--gae-lambda", type=float, default=defaults.gae_lambda)
+    p.add_argument("--max-grad-norm", type=float, default=defaults.max_grad_norm)
     p.add_argument("--torch-compile", action="store_true")
     p.add_argument("--no-linear-lr", action="store_true")
     p.add_argument("--no-norm-obs", action="store_true")
-    p.add_argument("--vec-backend", choices=["sync", "async"], default="async")
-    p.add_argument("--save-path", type=str, default="./dino_ppo.pt")
-    p.add_argument("--log-dir", type=str, default="./pt_logs")
-    p.add_argument("--minibatch-size", type=int, default=64)
+    p.add_argument("--vec-backend", choices=["sync", "async"], default=defaults.vec_backend)
+    p.add_argument("--save-path", type=str, default=defaults.save_path)
+    p.add_argument("--log-dir", type=str, default=defaults.log_dir)
+    p.add_argument("--minibatch-size", type=int, default=defaults.minibatch_size)
     p.add_argument("--no-speed-increases", action="store_true", help="Disable game speed increases over time")
-    p.add_argument("--alive-reward", type=float, default=0.1, help="Reward for staying alive per step")
-    p.add_argument("--death-penalty", type=float, default=-1.0, help="Penalty for dying")
+    p.add_argument("--alive-reward", type=float, default=defaults.alive_reward, help="Reward for staying alive per step")
+    p.add_argument("--death-penalty", type=float, default=defaults.death_penalty, help="Penalty for dying")
+    p.add_argument("--avoid-reward", type=float, default=defaults.avoid_reward, help="Reward for successfully avoiding an obstacle")
+    p.add_argument("--milestone-points", type=int, default=defaults.milestone_points, help="Score threshold for milestone bonus")
+    p.add_argument("--milestone-bonus", type=float, default=defaults.milestone_bonus, help="Bonus reward when reaching score milestones")
 
     a = p.parse_args()
     return PPOConfig(
@@ -388,6 +401,9 @@ def parse_args() -> PPOConfig:
         speed_increases=not a.no_speed_increases,
         alive_reward=a.alive_reward,
         death_penalty=a.death_penalty,
+        avoid_reward=a.avoid_reward,
+        milestone_points=a.milestone_points,
+        milestone_bonus=a.milestone_bonus,
     )
 
 

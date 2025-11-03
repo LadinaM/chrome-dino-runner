@@ -26,7 +26,10 @@ def make_env(
     render_mode=None, 
     speed_increases: bool = True,
     alive_reward: float = 0.1,
-    death_penalty: float = -1.0
+    death_penalty: float = -1.0,
+    avoid_reward: float = 1.0,
+    milestone_points: int = 10,
+    milestone_bonus: float = 2.0
 ) -> Callable[[], gym.Env]:
     def _thunk():
         env = ChromeDinoEnv(
@@ -34,7 +37,10 @@ def make_env(
             seed=seed + rank, 
             speed_increases=speed_increases,
             alive_reward=alive_reward,
-            death_penalty=death_penalty
+            death_penalty=death_penalty,
+            avoid_reward=avoid_reward,
+            milestone_points=milestone_points,
+            milestone_bonus=milestone_bonus
         )
         env = RecordEpisodeStatistics(env, deque_size=1000)
         return env
