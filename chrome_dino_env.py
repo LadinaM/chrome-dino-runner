@@ -72,8 +72,8 @@ class ChromeDinoEnv(gym.Env):
 
         # ----- RL spaces -----
         self.action_space = spaces.Discrete(3)  # 0 noop, 1 jump, 2 duck
-        # obs: [dino_y, dino_vy, rel_x, rel_y, onehot(3), speed]
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
+        # Observation shape: [y, vy, rel_x, rel_y, onehot(3), speed, ttc, airborne]
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32)
 
         # Rewards & rollout control
         self._alive_reward = float(alive_reward)
@@ -113,12 +113,32 @@ class ChromeDinoEnv(gym.Env):
             rel_y = float(nearest.rect.y - dino_rect.y)
             t = 0 if isinstance(nearest, SmallCactus) else 1 if isinstance(nearest, LargeCactus) else 2
         else:
+            # No obstacle: "far away"
             rel_x, rel_y, t = float(self._w), 0.0, 0
+
+        # Light clipping keeps features within a sane numeric range before ObsNorm
+        # (helps early training stability)
+        rel_x = float(np.clip(rel_x, 0.0, self._w))     # [0, screen_w]
+        rel_y = float(np.clip(rel_y, -self._h, self._h))# [-h, h]
 
         onehot = np.eye(3, dtype=np.float32)[t]
         speed = float(self.game_state.game_speed)
 
-        return np.array([y, vy, rel_x, rel_y, onehot[0], onehot[1], onehot[2], speed], dtype=np.float32)
+        # --- New features ---
+        # Time-to-collision in frames; add small epsilon to avoid div-by-zero.
+        # If no obstacle, ttc is "far" (we cap it so it doesn't explode).
+        eps = 1e-3
+        ttc = rel_x / max(speed, eps) if speed > eps else self._w
+        ttc = float(np.clip(ttc, 0.0, 300.0))  # cap to ~10 seconds at 30 fps
+
+        # Airborne flag (0 or 1). Policies learn much cleaner jump logic with this.
+        airborne = 1.0 if self._is_airborne() else 0.0
+
+        return np.array(
+            [y, vy, rel_x, rel_y, onehot[0], onehot[1], onehot[2], speed, ttc, airborne],
+            dtype=np.float32
+        )
+
 
     def _get_info(self) -> Dict[str, Any]:
         return {
@@ -158,11 +178,11 @@ class ChromeDinoEnv(gym.Env):
         # apply action intent once, then update multiple frames (frame skip)
         self._apply_action(action)
 
+        # Track obstacles at start of step (before any updates)
+        dino_x = float(self.player.dino_rect.x)
+        obstacles_ahead_at_start = {id(o): o.rect.x for o in self.game_state.obstacles if o.rect.x >= dino_x}
+        
         for _ in range(self._frame_skip):
-            # Track obstacles before update for avoidance detection
-            dino_x_before = float(self.player.dino_rect.x)
-            obstacles_ahead_before = {id(o) for o in self.game_state.obstacles if o.rect.x >= dino_x_before}
-            
             # update player
             self._update_player()
 
@@ -175,13 +195,15 @@ class ChromeDinoEnv(gym.Env):
                 reward += self._death_penalty
                 break
 
-            # Reward for successfully avoiding obstacles (obstacle passed behind)
-            dino_x_after = float(self.player.dino_rect.x)
+            # Reward for successfully avoiding obstacles (obstacle passed behind the dino)
+            # Dino X position is fixed, so we check if obstacle's right edge passed dino's left edge
             for ob in self.game_state.obstacles:
                 ob_id = id(ob)
-                # Obstacle was ahead before, now it's behind (passed successfully)
-                if ob_id in obstacles_ahead_before and ob.rect.x + ob.rect.width < dino_x_after:
+                # Obstacle was ahead at start of step, now it's completely behind (passed successfully)
+                if ob_id in obstacles_ahead_at_start and ob.rect.x + ob.rect.width < dino_x:
                     reward += self._avoid_reward
+                    # Remove from tracking to avoid duplicate rewards
+                    obstacles_ahead_at_start.pop(ob_id, None)
 
             # score and speed
             prev_points = self.game_state.points

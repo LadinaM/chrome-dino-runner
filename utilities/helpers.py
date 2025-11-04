@@ -20,28 +20,19 @@ def get_high_score():
     except (FileNotFoundError, ValueError):
         return 0
 
-def make_env(
-    rank: int, 
-    seed: int, 
-    render_mode=None, 
-    speed_increases: bool = True,
-    alive_reward: float = 0.1,
-    death_penalty: float = -1.0,
-    avoid_reward: float = 1.0,
-    milestone_points: int = 10,
-    milestone_bonus: float = 2.0
-) -> Callable[[], gym.Env]:
-    def _thunk():
+def make_env(rank, seed, **kwargs):
+    def thunk():
         env = ChromeDinoEnv(
-            render_mode=render_mode, 
-            seed=seed + rank, 
-            speed_increases=speed_increases,
-            alive_reward=alive_reward,
-            death_penalty=death_penalty,
-            avoid_reward=avoid_reward,
-            milestone_points=milestone_points,
-            milestone_bonus=milestone_bonus
+            render_mode=None,
+            frame_skip=1,                  # <— important for learning
+            alive_reward=kwargs.get("alive_reward", 0.05),
+            avoid_reward=kwargs.get("avoid_reward", 1.0),
+            death_penalty=kwargs.get("death_penalty", -1.0),
+            milestone_points=kwargs.get("milestone_points", 0),
+            milestone_bonus=kwargs.get("milestone_bonus", 0.0),
+            speed_increases=kwargs.get("speed_increases", True),
+            seed=seed + rank,
         )
-        env = RecordEpisodeStatistics(env, deque_size=1000)
         return env
-    return _thunk
+    return thunk
+

@@ -1,17 +1,19 @@
+import warnings
+# Suppress warnings before any other imports
+warnings.filterwarnings("ignore", module="pygame.pkgdata")
+warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
+
 import argparse
 import logging
 import math
 import os
 import time
-import warnings
 from dataclasses import dataclass
 
 from utilities.helpers import make_env
 from utilities.observations import set_seed, ObsNorm
-
-warnings.filterwarnings("ignore", module="pygame.pkgdata")
-warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
-warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")
 
 import numpy as np
 import torch
@@ -22,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -69,62 +71,62 @@ class PpoModel(nn.Module):
 class PPOConfig:
     seed: int = 42
     total_timesteps: int = 1_000_000
-    n_envs: int = 4
-    n_steps: int = 4096         # per env
+    n_envs: int = 8
+    n_steps: int = 2048         # per env
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    update_epochs: int = 8
+    update_epochs: int = 5
     clip_coef: float = 0.2
-    vf_clip_coef: float = 0.2
-    ent_coef: float = 0.1
+    vf_clip_coef: float = 0.1
+    ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
-    lr: float = 2e-4
+    lr: float = 2.5e-4
     linear_lr: bool = True
-    hidden: int = 256
+    hidden: int = 512
     torch_compile: bool = False
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     norm_obs: bool = True
     log_dir: str = "./pt_logs"
     save_path: str = "./dino_ppo.pt"
     vec_backend: str = "async"  # "sync" or "async"
-    minibatch_size: int = 64
+    minibatch_size: int = 256
     speed_increases: bool = False  # Whether game speed increases over time
-    alive_reward: float = 0.2  # Reward for staying alive per step
-    death_penalty: float = -10.0  # Penalty for dying
-    avoid_reward: float = 5.0  # Reward for successfully avoiding an obstacle
-    milestone_points: int = 10  # Score threshold for milestone bonus
-    milestone_bonus: float = 5.0  # Bonus reward when reaching score milestones
+    alive_reward: float = 1.0      # Reward for staying alive per step
+    death_penalty: float = -100.0  # Penalty for dying
+    avoid_reward: float = 20.0     # Reward for successfully avoiding an obstacle
+    milestone_points: int = 10     # Score threshold for milestone bonus
+    milestone_bonus: float = 20.0  # Bonus reward when reaching score milestones
 
 
 def ppo_train(cfg: PPOConfig):
     set_seed(cfg.seed)
     os.makedirs(cfg.log_dir, exist_ok=True)
 
-    # Initialize TensorBoard writer
     tb_writer = SummaryWriter(log_dir=cfg.log_dir)
 
     # ---- Vectorized envs
     if cfg.vec_backend == "async" and cfg.n_envs > 1:
         envs = AsyncVectorEnv([
-            make_env(i, cfg.seed, speed_increases=cfg.speed_increases, 
+            make_env(i, cfg.seed,
+                     speed_increases=cfg.speed_increases,
                      alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty,
                      avoid_reward=cfg.avoid_reward, milestone_points=cfg.milestone_points,
-                     milestone_bonus=cfg.milestone_bonus) 
+                     milestone_bonus=cfg.milestone_bonus)
             for i in range(cfg.n_envs)
         ])
     else:
         envs = SyncVectorEnv([
-            make_env(i, cfg.seed, speed_increases=cfg.speed_increases,
+            make_env(i, cfg.seed,
+                     speed_increases=cfg.speed_increases,
                      alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty,
                      avoid_reward=cfg.avoid_reward, milestone_points=cfg.milestone_points,
-                     milestone_bonus=cfg.milestone_bonus) 
+                     milestone_bonus=cfg.milestone_bonus)
             for i in range(cfg.n_envs)
         ])
 
     # Reset: Gymnasium vector returns (obs, infos)
     next_obs, _ = envs.reset(seed=cfg.seed)
-    # Shapes: obs -> (n_envs, obs_dim)
     obs_dim = next_obs.shape[1]
     act_dim = envs.single_action_space.n
 
@@ -153,8 +155,6 @@ def ppo_train(cfg: PPOConfig):
     done_buf = np.zeros((num_steps, cfg.n_envs), dtype=np.float32)
     val_buf = np.zeros((num_steps, cfg.n_envs), dtype=np.float32)
 
-    next_done = np.zeros((cfg.n_envs,), dtype=np.float32)
-
     global_step = 0
     updates = math.ceil(cfg.total_timesteps / batch_size)
     episode_count = 0
@@ -166,6 +166,9 @@ def ppo_train(cfg: PPOConfig):
             for pg in optimizer.param_groups:
                 pg["lr"] = cfg.lr * frac
 
+        # rollout action histogram (debug)
+        action_counts = np.zeros(act_dim, dtype=np.int64)
+
         # Collect rollout
         for step in range(num_steps):
             global_step += cfg.n_envs
@@ -175,22 +178,27 @@ def ppo_train(cfg: PPOConfig):
             obs_t = torch.as_tensor(next_obs, device=cfg.device, dtype=torch.float32)
             with torch.no_grad():
                 action_t, logp_t, value_t = model.act(obs_t)
+
             action_np = action_t.cpu().numpy()
             logp_np = logp_t.cpu().numpy()
             value_np = value_t.cpu().numpy()
 
+            # Step envs
+            next_obs, rewards, terminations, truncations, infos = envs.step(action_np)
+            dones = np.logical_or(terminations, truncations).astype(np.float32)
+
+            # Store current transition (FIXED: use current dones)
             act_buf[step] = action_np
             logp_buf[step] = logp_np
             val_buf[step] = value_np
-            done_buf[step] = next_done
-
-            # Vector step (Gymnasium vector API)
-            next_obs, rewards, terminations, truncations, infos = envs.step(action_np)
-            dones = np.logical_or(terminations, truncations).astype(np.float32)
             rew_buf[step] = rewards
+            done_buf[step] = dones
 
-            # Episode logging via final_info
-            # Gymnasium vector auto-resets and provides final stats in infos["final_info"]
+            # Track action distribution
+            for a in action_np:
+                action_counts[int(a)] += 1
+
+            # Episode logging via final_info (vector auto-resets)
             final_infos = infos.get("final_info", None)
             if final_infos is not None:
                 for fi in final_infos:
@@ -198,8 +206,7 @@ def ppo_train(cfg: PPOConfig):
                         ep_r = float(np.asarray(fi["episode"]["r"]).item())
                         ep_l = int(np.asarray(fi["episode"]["l"]).item())
                         logger.info(f"[{global_step}] ep_return={ep_r:6.1f}  ep_len={ep_l:>4}")
-                        
-                        # Log episode metrics to TensorBoard
+
                         episode_count += 1
                         tb_writer.add_scalar("episode/return", ep_r, episode_count)
                         tb_writer.add_scalar("episode/length", ep_l, episode_count)
@@ -209,8 +216,6 @@ def ppo_train(cfg: PPOConfig):
             if obs_norm is not None:
                 obs_norm.update(next_obs)
                 next_obs = obs_norm.normalize(next_obs)
-
-            next_done = dones
 
         # Compute advantages with GAE(λ)
         with torch.no_grad():
@@ -235,7 +240,7 @@ def ppo_train(cfg: PPOConfig):
         b_logp_old = torch.as_tensor(logp_buf.reshape(batch_size), device=cfg.device)
         b_adv = torch.as_tensor(adv_buf.reshape(batch_size), device=cfg.device)
         b_ret = torch.as_tensor(ret_buf.reshape(batch_size), device=cfg.device)
-        b_val_old = torch.as_tensor(val_buf.reshape(batch_size), device=cfg.device)
+        b_val_old = torch.as_tensor(val_buf.reshape(batch_size), device=cfg.device).detach()
 
         # Advantage norm
         b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
@@ -243,12 +248,11 @@ def ppo_train(cfg: PPOConfig):
         # Update policy for several epochs
         inds = np.arange(batch_size)
         mb = cfg.minibatch_size
-        
-        # Track metrics for logging
+
         epoch_policy_losses = []
         epoch_value_losses = []
         epoch_entropies = []
-        
+
         for epoch in range(cfg.update_epochs):
             np.random.shuffle(inds)
             for start in range(0, batch_size, mb):
@@ -269,8 +273,8 @@ def ppo_train(cfg: PPOConfig):
                 # Value loss (with optional clip)
                 if cfg.vf_clip_coef > 0:
                     v_clipped = b_val_old[mb_inds] + (value - b_val_old[mb_inds]).clamp(-cfg.vf_clip_coef, cfg.vf_clip_coef)
-                    v_loss_unclipped = (value - b_ret[mb_inds])**2
-                    v_loss_clipped = (v_clipped - b_ret[mb_inds])**2
+                    v_loss_unclipped = (value - b_ret[mb_inds]) ** 2
+                    v_loss_clipped = (v_clipped - b_ret[mb_inds]) ** 2
                     value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
                 else:
                     value_loss = 0.5 * (b_ret[mb_inds] - value).pow(2).mean()
@@ -282,7 +286,6 @@ def ppo_train(cfg: PPOConfig):
                 nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                 optimizer.step()
 
-                # Accumulate metrics for logging
                 epoch_policy_losses.append(policy_loss.item())
                 epoch_value_losses.append(value_loss.item())
                 epoch_entropies.append(entropy.item())
@@ -293,24 +296,27 @@ def ppo_train(cfg: PPOConfig):
             avg_value_loss = np.mean(epoch_value_losses)
             avg_entropy = np.mean(epoch_entropies)
             current_lr = optimizer.param_groups[0]["lr"]
-            
+
             tb_writer.add_scalar("train/policy_loss", avg_policy_loss, global_step)
             tb_writer.add_scalar("train/value_loss", avg_value_loss, global_step)
             tb_writer.add_scalar("train/entropy", avg_entropy, global_step)
             tb_writer.add_scalar("train/learning_rate", current_lr, global_step)
             tb_writer.add_scalar("train/update", update, global_step)
-            
-            # Log advantage statistics
+
+            # Advantage / value / rollout stats
             tb_writer.add_scalar("train/advantage_mean", b_adv.mean().item(), global_step)
             tb_writer.add_scalar("train/advantage_std", b_adv.std().item(), global_step)
-            
-            # Log value statistics
             tb_writer.add_scalar("train/value_mean", b_val_old.mean().item(), global_step)
-            
-            # Log reward statistics from rollout
             tb_writer.add_scalar("rollout/reward_mean", rew_buf.mean(), global_step)
             tb_writer.add_scalar("rollout/reward_sum", rew_buf.sum(), global_step)
             tb_writer.add_scalar("rollout/return_mean", ret_buf.mean(), global_step)
+
+            # Action distribution over the rollout
+            action_total = action_counts.sum()
+            if action_total > 0:
+                for a in range(len(action_counts)):
+                    tb_writer.add_scalar(f"actions/freq_action_{a}",
+                                         action_counts[a] / action_total, global_step)
 
         # simple checkpointing
         if update % 10 == 0 or update == updates:
@@ -329,11 +335,10 @@ def ppo_train(cfg: PPOConfig):
 
             elapsed = time.time() - start_time
             logger.info(f"[update {update}/{updates}] saved to {cfg.save_path} | elapsed={elapsed/60:.1f} min")
-            
-            # Log timing metrics
+
             tb_writer.add_scalar("time/elapsed_minutes", elapsed / 60, global_step)
             tb_writer.add_scalar("time/steps_per_second", global_step / elapsed, global_step)
-    
+
     envs.close()
     tb_writer.close()
     logger.info("Training done.")
@@ -343,9 +348,8 @@ def ppo_train(cfg: PPOConfig):
 # CLI
 # ----------------------------
 def parse_args() -> PPOConfig:
-    # Use PPOConfig as single source of truth for defaults
     defaults = PPOConfig()
-    
+
     p = argparse.ArgumentParser()
     p.add_argument("--seed", type=int, default=defaults.seed)
     p.add_argument("--total-timesteps", type=int, default=defaults.total_timesteps)
