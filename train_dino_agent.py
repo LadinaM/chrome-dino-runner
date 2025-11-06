@@ -412,5 +412,7 @@ def parse_args() -> PPOConfig:
 
 
 if __name__ == "__main__":
+    logger.info("Starting training...")
     cfg = parse_args()
+    logger.info(f"Configuration: {cfg}")
     ppo_train(cfg)

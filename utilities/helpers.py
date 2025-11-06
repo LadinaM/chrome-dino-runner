@@ -33,6 +33,7 @@ def make_env(rank, seed, **kwargs):
             speed_increases=kwargs.get("speed_increases", True),
             seed=seed + rank,
         )
+        env = RecordEpisodeStatistics(env, deque_size=1000)
         return env
     return thunk
 
