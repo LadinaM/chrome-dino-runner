@@ -245,41 +245,39 @@ class ChromeDinoEnv(gym.Env):
 
     # ---------- Internals ----------
     def _apply_action(self, action: int) -> None:
+        grounded = not self._is_airborne()
+
         # Prefer direct hooks if present
         has_jump = hasattr(self.player, "jump") and callable(self.player.jump)
         has_duck = hasattr(self.player, "duck") and callable(self.player.duck)
-        has_rel = hasattr(self.player, "release_duck") and callable(getattr(self.player, "release_duck", None))
+        has_rel  = hasattr(self.player, "release_duck") and callable(getattr(self.player, "release_duck", None))
 
         if has_jump and has_duck and has_rel:
-            if action == 1:
-                self.player.jump()
-            elif action == 2 and not self._is_airborne():
-                self.player.duck()
+            if action == 1 and grounded:
+                self.player.jump()                # jump only from ground
+                self.player.release_duck()        # ensure not ducking while initiating jump
+            elif action == 2 and grounded:
+                self.player.duck()                # duck only on ground
             else:
-                self.player.release_duck()
+                self.player.release_duck()        # default: stand / keep jumping physics to update
             return
 
-        # Fallback: emulate minimal key state for current Dinosaur.update(userInput)
+        # Fallback: emulate key state for Dinosaur.update(userInput)
         class _KeyProxy:
             def __init__(self, up: bool, down: bool, space: bool):
                 self._u, self._d, self._s = up, down, space
-
             def __getitem__(self, key: int) -> bool:
-                if key == pygame.K_UP:
-                    return self._u
-                if key == pygame.K_DOWN:
-                    return self._d
-                if key == pygame.K_SPACE:
-                    return self._s
+                if key == pygame.K_UP:    return self._u
+                if key == pygame.K_DOWN:  return self._d
+                if key == pygame.K_SPACE: return self._s
                 return False
 
-        if action == 1:
-            keys = _KeyProxy(True, False, True)  # jump: up/space
-        elif action == 2:
-            keys = _KeyProxy(False, not self._is_airborne(), False)  # duck only if grounded
-        else:
-            keys = _KeyProxy(False, False, False)
-        self.player.update(keys)
+        up    = (action == 1) and grounded
+        down  = (action == 2) and grounded
+        space = up  # typical mapping: jump = up/space
+
+        self.player.update(_KeyProxy(up, down, space))
+
 
     def _spawn_and_update_obstacles(self) -> None:
         # spawn if none
