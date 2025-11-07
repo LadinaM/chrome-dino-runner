@@ -1,5 +1,4 @@
 import warnings
-# Suppress warnings before any other imports
 warnings.filterwarnings("ignore", module="pygame.pkgdata")
 warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")

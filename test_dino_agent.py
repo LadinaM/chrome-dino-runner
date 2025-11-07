@@ -1,3 +1,9 @@
+import warnings
+warnings.filterwarnings("ignore", module="pygame.pkgdata")
+warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
+
 import time, torch, numpy as np
 from chrome_dino_env import ChromeDinoEnv
 from train_dino_agent import PpoModel

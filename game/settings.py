@@ -30,7 +30,7 @@ class GameSettings:
 class GameState:
     """Shared game state management"""
     
-    def __init__(self, speed_increases: bool = True):
+    def __init__(self, speed_increases: bool = False):
         self.game_speed = GameSettings.INITIAL_GAME_SPEED
         self.x_pos_bg = 0
         self.y_pos_bg = GameSettings.Y_POS_BG

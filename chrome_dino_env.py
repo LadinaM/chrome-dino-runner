@@ -37,7 +37,7 @@ class ChromeDinoEnv(gym.Env):
             milestone_bonus: float = 0.0,  # small bonus
             death_penalty: float = -1.0,
             avoid_reward: float = 1.0,  # Reward for successfully avoiding an obstacle
-            speed_increases: bool = True,
+            speed_increases: bool = False,
             seed: Optional[int] = None
     ):
         super().__init__()
