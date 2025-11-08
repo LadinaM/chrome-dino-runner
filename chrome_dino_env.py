@@ -96,14 +96,28 @@ class ChromeDinoEnv(gym.Env):
 
     # ---------- Observations & info ----------
     def _get_obs(self) -> np.ndarray:
+        """
+        Build a normalized 10-D observation vector:
+        [ y_n, vy_n, rel_x_n, rel_y_n, onehot_s, onehot_l, onehot_b, speed_n, ttc_n, airborne ]
+
+        where:
+        y_n      : dino vertical position / screen height  (0..1)
+        vy_n     : vertical velocity (positive = moving up) / screen height
+        rel_x_n  : horizontal distance to nearest obstacle / screen width (0..1)
+        rel_y_n  : vertical offset to nearest obstacle / screen height (-1..1)
+        onehot_* : obstacle type one-hot (small cactus, large cactus, bird)
+        speed_n  : game speed normalized by a cap (default 100)
+        ttc_n    : time-to-collision (frames) normalized by a cap (default 300)
+        airborne : 1.0 if dino is airborne else 0.0
+        """
         dino_rect = self.player.dino_rect
         y = float(dino_rect.y)
 
-        # finite-difference vy (pixels/frame)
-        vy = y - self._prev_dino_y
+        # vy: positive when moving UP
+        vy = self._prev_dino_y - y
         self._prev_dino_y = y
 
-        # pick next obstacle ahead (x >= dino_x)
+        # pick nearest obstacle ahead (x >= dino_x)
         dino_x = float(dino_rect.x)
         ahead = [o for o in self.game_state.obstacles if o.rect.x >= dino_x]
         nearest = min(ahead, key=lambda o: o.rect.x, default=None)
@@ -111,33 +125,52 @@ class ChromeDinoEnv(gym.Env):
         if nearest is not None:
             rel_x = float(nearest.rect.x - dino_x)
             rel_y = float(nearest.rect.y - dino_rect.y)
-            t = 0 if isinstance(nearest, SmallCactus) else 1 if isinstance(nearest, LargeCactus) else 2
+            # type: 0 small cactus, 1 large cactus, 2 bird
+            if isinstance(nearest, SmallCactus):
+                t = 0
+            elif isinstance(nearest, LargeCactus):
+                t = 1
+            else:
+                t = 2
         else:
-            # No obstacle: "far away"
+            # no obstacle: treat as far away and level with dino
             rel_x, rel_y, t = float(self._w), 0.0, 0
 
-        # Light clipping keeps features within a sane numeric range before ObsNorm
-        # (helps early training stability)
-        rel_x = float(np.clip(rel_x, 0.0, self._w))     # [0, screen_w]
-        rel_y = float(np.clip(rel_y, -self._h, self._h))# [-h, h]
+        # one-hot for obstacle type
+        onehot = np.zeros(3, dtype=np.float32)
+        onehot[t] = 1.0
 
-        onehot = np.eye(3, dtype=np.float32)[t]
+        # configurable caps (fallback to sensible defaults if not set on self)
+        speed_cap = getattr(self, "_obs_speed_cap", 100.0)   # denominator for speed_n
+        ttc_cap   = getattr(self, "_obs_ttc_cap",   300.0)   # denominator for ttc_n
+
+        # normalization by screen size (keeps values ~[-1,1])
+        y_n     = y  / float(self._h)
+        vy_n    = vy / float(self._h)
+        rel_x_n = float(np.clip(rel_x / float(self._w), 0.0, 1.0))
+        rel_y_n = float(np.clip(rel_y / float(self._h), -1.0, 1.0))
+
+        # normalized speed
         speed = float(self.game_state.game_speed)
+        speed_n = float(np.clip(speed / speed_cap, 0.0, 1.0))
 
-        # --- New features ---
-        # Time-to-collision in frames; add small epsilon to avoid div-by-zero.
-        # If no obstacle, ttc is "far" (we cap it so it doesn't explode).
-        eps = 1e-3
-        ttc = rel_x / max(speed, eps) if speed > eps else self._w
-        ttc = float(np.clip(ttc, 0.0, 300.0))  # cap to ~10 seconds at 30 fps
+        # time-to-collision (frames). If no obstacle, use max cap.
+        # add small eps to avoid division by zero at very low speeds
+        eps = 1e-6
+        if nearest is not None and speed > eps:
+            ttc = rel_x / max(speed, eps)
+        else:
+            ttc = ttc_cap
+        ttc_n = float(np.clip(ttc / ttc_cap, 0.0, 1.0))
 
-        # Airborne flag (0 or 1). Policies learn much cleaner jump logic with this.
         airborne = 1.0 if self._is_airborne() else 0.0
 
-        return np.array(
-            [y, vy, rel_x, rel_y, onehot[0], onehot[1], onehot[2], speed, ttc, airborne],
+        obs = np.array(
+            [y_n, vy_n, rel_x_n, rel_y_n, onehot[0], onehot[1], onehot[2], speed_n, ttc_n, airborne],
             dtype=np.float32
         )
+        return obs
+
 
 
     def _get_info(self) -> Dict[str, Any]:

@@ -1,7 +1,3 @@
-import gymnasium as gym
-
-from typing import Callable
-
 from gymnasium.wrappers import RecordEpisodeStatistics
 
 from chrome_dino_env import ChromeDinoEnv
@@ -24,7 +20,7 @@ def make_env(rank, seed, **kwargs):
     def thunk():
         env = ChromeDinoEnv(
             render_mode=None,
-            frame_skip=1,                  # <— important for learning
+            frame_skip=1,
             alive_reward=kwargs.get("alive_reward", 0.05),
             avoid_reward=kwargs.get("avoid_reward", 1.0),
             death_penalty=kwargs.get("death_penalty", -1.0),
