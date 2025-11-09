@@ -1,74 +1,99 @@
 import warnings
-warnings.filterwarnings("ignore", module="pygame.pkgdata")
+# Suppress warnings before any other imports
+warnings.filterwarnings("ignore", module="pygame.pkgdata")  # okay because version of pygame is pinned
 warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
 
-import time, torch, numpy as np
+import argparse
+import logging
+import numpy as np
+import torch
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+from torch.serialization import add_safe_globals
+
 from chrome_dino_env import ChromeDinoEnv
 from train_dino_agent import PpoModel
 from utilities.observations import ObsNorm
-from torch.serialization import add_safe_globals
 
-def load_ckpt(path, obs_dim, act_dim, device):
-    add_safe_globals([np._core.multiarray._reconstruct])
+
+def load_checkpoint(path: str, obs_dim: int, act_dim: int, device: str = "cpu"):
+    # 1) Load (trusted local ckpt)
+
+    add_safe_globals([np._core.multiarray._reconstruct])  # keep if weights_only=True path is used anywhere
     data = torch.load(path, map_location=device, weights_only=False)
-    hidden = data.get("cfg", {}).get("hidden", 512)
-    model = PpoModel(obs_dim, act_dim, hidden=hidden).to(device).eval()
 
-    sd = data["model_state_dict"]
-    if any(k.startswith("_orig_mod.") for k in sd):  # torch.compile case
-        sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
-    model.load_state_dict(sd)
+    hidden = data.get("cfg", {}).get("hidden", 128)
+    model = PpoModel(obs_dim, act_dim, hidden=hidden).to(device)
 
+    # 2) Handle torch.compile state dicts
+    state_dict = data["model_state_dict"]
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        state_dict = {k.replace("_orig_mod.", "", 1): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    # 3) Rebuild obs_norm if present (supports lists or numpy)
     obs_norm = None
-    if data.get("obs_norm"):
-        on = data["obs_norm"]
+    on = data.get("obs_norm")
+    if on is not None:
         obs_norm = ObsNorm(obs_dim)
         obs_norm.mean = np.array(on["mean"], dtype=np.float64)
         obs_norm.var  = np.array(on["var"],  dtype=np.float64)
         obs_norm.count = float(on["count"])
         obs_norm.clip  = float(on["clip"])
-    cfg = data.get("cfg", {})
-    return model, obs_norm, cfg
+
+    return model, obs_norm, data.get("cfg", {})
+
+
 
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    # build a temp env to get dims
-    tmp = ChromeDinoEnv(render_mode=None, frame_skip=1)
-    obs, _ = tmp.reset(); obs_dim = obs.shape[-1]; act_dim = tmp.action_space.n
-    tmp.close()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", type=str, default="./dino_ppo.pt")
+    ap.add_argument("--episodes", type=int, default=5)
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    args = ap.parse_args()
 
-    model, obs_norm, cfg = load_ckpt("./dino_ppo.pt", obs_dim, act_dim, device)
+    # Human render env
+    env = ChromeDinoEnv(render_mode="human", seed=123)
+    obs, _ = env.reset()
+    obs_dim = obs.shape[-1]
+    act_dim = env.action_space.n
 
-    # mirror key training knobs
-    env = ChromeDinoEnv(
-        render_mode="human",
-        frame_skip=1,
-        speed_increases=bool(cfg.get("speed_increases", False)),
-        alive_reward=cfg.get("alive_reward", 0.1),
-        death_penalty=cfg.get("death_penalty", -1.0),
-        avoid_reward=cfg.get("avoid_reward", 1.0),
-        milestone_points=cfg.get("milestone_points", 0),
-        milestone_bonus=cfg.get("milestone_bonus", 0.0),
-        seed=123,
-    )
+    model, obs_norm, cfg = load_checkpoint(args.model, obs_dim, act_dim, device=args.device)
 
-    for ep in range(3):
+    for ep in range(args.episodes):
         obs, _ = env.reset()
         done = False
+        ep_ret = 0.0
         while not done:
             if obs_norm is not None:
                 obs = obs_norm.normalize(obs)
+
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=args.device).unsqueeze(0)
             with torch.no_grad():
-                x = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-                logits, _ = model(x)
-                action = int(torch.argmax(logits, dim=-1).item())  # deterministic
-            obs, _, term, trunc, _ = env.step(action)
-            done = term or trunc
-            # optional: throttle if your CPU/GPU is too fast
-            # time.sleep(1/60)
+                logits, _ = model.forward(obs_t)
+                dist = torch.distributions.Categorical(logits=logits)
+                action = dist.probs.argmax(dim=-1)  # greedy
+                action = int(action.item())
+
+            obs, r, terminated, truncated, info = env.step(action)
+            ep_ret += float(r)
+            done = terminated or truncated
+
+        score = info.get('score', 'n/a')
+        logger.info(f"[Episode {ep+1}] return={ep_ret:10.1f}  score={score:>5}")
     env.close()
+
 
 if __name__ == "__main__":
     main()

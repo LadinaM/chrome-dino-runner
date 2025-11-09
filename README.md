@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/DinoWallpaper.png" width="97" height="97">
+  <img src="./assets/DinoWallpaper.png" width="97" height="97" alt="Chrome's Dino">
   <h2 align="center" style="margin-top: -4px !important;">A Replica of the hidden Dinosaur Game from Chrome Browser Offline mode so you don't have to be offline to play it...😂😂</h2>
   
 
@@ -13,12 +13,12 @@ The following represents a recreated version of the famous Dinosaur Game from Ch
 A simple and easy-to-use GUI is provided for better gameplay. The gameplay design is so simple that the user won’t find it difficult to use and understand. Different images are used in the development of this simple game project, the gaming environment is just like the original Chrome Dino Run game. For demo of the project, have a look at the GIF below.
 
 <p align="center">
-  <img src="./assets/Other/Chrome%20Dino.gif">
+  <img src="./assets/Other/Chrome%20Dino.gif" alt="Sequence of Chrome's Dino Runner">
 </p>
 
-### Project Structure:
+### Project Structure
 
-```
+```bash
 chrome-dino-runner/
 ├── assets/                # Game assets (images, sprites)
 │   ├── Bird/              # Bird obstacle sprites
@@ -47,28 +47,32 @@ chrome-dino-runner/
 └── README.md              # Project documentation
 ```
 
-### Installation:
+### Installation
 
 -	First of all, **clone the repository** using:
-```
+
+```bash
 git clone https://github.com/LadinaM/chrome-dino-runner.git
-``` 
+```
+
 **OR**
 Download the Zip and extract it's contents.
 
 -	Then download the dependencies in your Command Prompt OR Terminal using:
-```
+
+```bash
 pip install -r requirements.txt
 ```
 
-### Usage:
+### Usage
 
 -	After installation, just run the [`chromedino.py`](https://github.com/LadinaM/chrome-dino-runner/blob/master/chromedino.py) using
-```
+
+```bash
 python chrome_dino.py
 ```
 
-### Code Refactoring:
+### Code Refactoring
 
 The project has been refactored to reduce code duplication between the main game and RL environment:
 
@@ -76,7 +80,7 @@ The project has been refactored to reduce code duplication between the main game
 - **`chrome_dino.py`** - Main game
 - **`chrome_dino_env.py`** - RL environment
 
-### Input:
+### Input
 
 | Keys              | Actions                                                       |
 |-------------------|---------------------------------------------------------------|
@@ -87,46 +91,52 @@ The project has been refactored to reduce code duplication between the main game
 |   `ESC`           |    Pause the game (alternative to 'p')      |
 |   `u`             |    Unpause the game     |
 
-### Reinforcement Learning Features:
+### Reinforcement Learning Features
 
 This project includes a reinforcement learning environment for training AI agents to play the Chrome Dino game automatically.
 
-#### Files:
+#### Files
+
 - `chrome_dino_env.py` - Gymnasium environment for RL training
 - `train_dino_agent.py` - Training script using Stable-Baselines3 PPO
 - `test_env.py` - Environment testing script
 
-#### Training the AI Agent:
+#### Training the AI Agent
 
-1. **Install additional dependencies:**
+1. **Install additional dependencies**
+
 ```bash
 pip install -r requirements.txt
 ```
 
-2. **Train the agent:**
+2. **Train the agent**
+
 ```bash
 python train_dino_agent.py
 ```
 
 The training script will:
+
 - Train a PPO agent for 100'000 timesteps
 - Save checkpoints every 5'000 timesteps
 - Save the best model based on evaluation performance
 - Test the trained model on 5 episodes
 
-#### Monitoring Training with TensorBoard:
+#### Monitoring Training with TensorBoard
 
 TensorBoard provides real-time visualization of training metrics.
 
 1. **Start TensorBoard:**
+
 ```bash
-tensorboard --logdir=./tensorboard_logs --port=6006
+tensorboard --logdir=./pt_logs --port=6000
 ```
 
 2. **View in browser:**
-Open http://localhost:6006 in your web browser
 
+Open http://localhost:6006 in your web browser
 3. **Available metrics:**
+
 - **Scalars** - Training curves for:
   - Episode reward
   - Episode length
@@ -137,13 +147,17 @@ Open http://localhost:6006 in your web browser
 - **Environment Info** - Game speed, score, obstacle count
 
 #### Action Space:
+
 The RL environment supports 3 actions:
-- **Action 0**: Do nothing
-- **Action 1**: Jump (avoid cacti)
-- **Action 2**: Duck (avoid birds)
+
+- **Action 0**: Do nothing/Run
+- **Action 1**: Jump
+- **Action 2**: Duck
 
 #### Observation Space:
+
 The agent receives a 6-dimensional state vector:
+
 - Dino Y position
 - Dino velocity
 - Nearest obstacle X position
@@ -151,21 +165,23 @@ The agent receives a 6-dimensional state vector:
 - Nearest obstacle type (0=cactus, 1=large cactus, 2=bird)
 - Game speed
 
-#### Model Files:
+#### Model Files
+
 - `dino_final_model` - Final trained model
 - `best_model/` - Best model based on evaluation
 - `checkpoints/` - Training checkpoints
 - `tensorboard_logs/` - Training logs for TensorBoard
 
-#### Testing the Trained Model:
+#### Testing the Trained Model
+
 ```bash
 python test_env.py
 ```
 
 This will load the trained model and run it in the game environment for evaluation.
 
+### References
 
-### References:
 -	http://www.pygame.org/docs
 -	https://en.wikipedia.org/wiki/Dinosaur_Game
 -	Various articles and videos.

@@ -88,6 +88,7 @@ class ChromeDinoEnv(gym.Env):
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)  # for vy finite diff
         self._prev_obstacle_ids = set()  # Track obstacles from previous step for avoidance rewards
+        self._avoided_this_episode = 0  # Count obstacles the dino successfully passed
 
         # Seeding
         self.np_random, _ = seeding.np_random(seed)
@@ -195,6 +196,7 @@ class ChromeDinoEnv(gym.Env):
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)
         self._prev_obstacle_ids = set()
+        self._avoided_this_episode = 0
 
         # Optional: clear screen for human mode
         self._fill_bg()
@@ -228,15 +230,15 @@ class ChromeDinoEnv(gym.Env):
                 reward += self._death_penalty
                 break
 
-            # Reward for successfully avoiding obstacles (obstacle passed behind the dino)
-            # Dino X position is fixed, so we check if obstacle's right edge passed dino's left edge
+            # Reward for successfully avoiding obstacles (passed behind dino)
+            # Use a per-obstacle flag to ensure we count each obstacle once.
             for ob in self.game_state.obstacles:
-                ob_id = id(ob)
-                # Obstacle was ahead at start of step, now it's completely behind (passed successfully)
-                if ob_id in obstacles_ahead_at_start and ob.rect.x + ob.rect.width < dino_x:
+                passed = (ob.rect.x + ob.rect.width) < dino_x
+                already_counted = getattr(ob, "_passed_counted", False)
+                if passed and not already_counted:
+                    setattr(ob, "_passed_counted", True)
                     reward += self._avoid_reward
-                    # Remove from tracking to avoid duplicate rewards
-                    obstacles_ahead_at_start.pop(ob_id, None)
+                    self._avoided_this_episode += 1
 
             # score and speed
             prev_points = self.game_state.points
@@ -262,6 +264,8 @@ class ChromeDinoEnv(gym.Env):
         obs = self._get_obs()
         info = self._get_info()
         info["episode_length"] = self._steps
+        if terminated or truncated:
+            info["avoided_count"] = int(self._avoided_this_episode)
         return obs, float(reward), bool(terminated), bool(truncated), info
 
     # --------- Game ----------------
@@ -270,6 +274,8 @@ class ChromeDinoEnv(gym.Env):
             self._render_frame()
             self._pump_events()
         elif self.render_mode == "rgb_array":
+            # Draw a fresh frame before capturing to avoid visual artifacts
+            self._render_frame()
             arr = pygame.surfarray.array3d(self.SCREEN)  # (W, H, 3)
             return np.transpose(arr, (1, 0, 2))  # (H, W, 3)
 

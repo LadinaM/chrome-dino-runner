@@ -19,7 +19,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
+from gymnasium.wrappers import RecordVideo
 from torch.utils.tensorboard import SummaryWriter
+from chrome_dino_env import ChromeDinoEnv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,6 +105,46 @@ def ppo_train(cfg: PPOConfig):
     os.makedirs(cfg.log_dir, exist_ok=True)
 
     tb_writer = SummaryWriter(log_dir=cfg.log_dir)
+    # Unique run-specific video directory to avoid overwrite warnings
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    video_dir = os.path.join(cfg.log_dir, "videos", run_id)
+
+    # Record videos at % of total timesteps: 10%, 30%, 60%, 100%
+    milestone_percents = [0.10, 0.30, 0.60, 1.00]
+    video_step_milestones = {int(cfg.total_timesteps * p): int(p * 100) for p in milestone_percents}
+    recorded_step_milestones = set()
+
+    def record_policy_video(episode_num: int, max_steps: int = 5000):
+        """Run a single evaluation episode and save a video."""
+        fname = f"episode_{episode_num}"
+        logger.info(f"Recording video for episode {episode_num}...")
+        eval_env = ChromeDinoEnv(
+            render_mode="rgb_array",
+            frame_skip=1,
+            speed_increases=cfg.speed_increases,
+            alive_reward=cfg.alive_reward,
+            death_penalty=cfg.death_penalty,
+            avoid_reward=cfg.avoid_reward,
+            milestone_points=cfg.milestone_points,
+            milestone_bonus=cfg.milestone_bonus,
+            seed=cfg.seed,
+        )
+        rec_env = RecordVideo(eval_env, video_folder=video_dir, name_prefix=fname)
+        obs, _ = rec_env.reset(seed=cfg.seed)
+        done = False
+        steps = 0
+        while not done and steps < max_steps:
+            if obs_norm is not None:
+                obs = obs_norm.normalize(obs)
+            with torch.no_grad():
+                x = torch.as_tensor(obs, dtype=torch.float32, device=cfg.device).unsqueeze(0)
+                logits, _ = model(x)
+                action = int(torch.argmax(logits, dim=-1).item())  # deterministic for clarity
+            obs, _, term, trunc, _ = rec_env.step(action)
+            done = bool(term or trunc)
+            steps += 1
+        rec_env.close()
+        logger.info(f"Saved video: {os.path.join(video_dir, fname)}.*")
 
     # ---- Vectorized envs
     if cfg.vec_backend == "async" and cfg.n_envs > 1:
@@ -173,6 +215,16 @@ def ppo_train(cfg: PPOConfig):
             global_step += cfg.n_envs
             obs_buf[step] = next_obs
 
+            # Check step-based video milestones (relative to total timesteps)
+            for ms_step, ms_pct in video_step_milestones.items():
+                if global_step >= ms_step and ms_step not in recorded_step_milestones:
+                    try:
+                        record_policy_video(ms_pct)
+                    except Exception as e:
+                        logger.warning(f"Video recording failed at {ms_pct}% ({ms_step} steps): {e}")
+                    else:
+                        recorded_step_milestones.add(ms_step)
+
             # torch forward on device
             obs_t = torch.as_tensor(next_obs, device=cfg.device, dtype=torch.float32)
             with torch.no_grad():
@@ -204,13 +256,18 @@ def ppo_train(cfg: PPOConfig):
                     if fi is not None and "episode" in fi:
                         ep_r = float(np.asarray(fi["episode"]["r"]).item())
                         ep_l = int(np.asarray(fi["episode"]["l"]).item())
-                        logger.info(f"[{global_step}] ep_return={ep_r:6.1f}  ep_len={ep_l:>4}")
+                        avoided = int(fi.get("avoided_count", 0))
+                        logger.info(f"[{global_step}] ep_return={ep_r:10.1f}  ep_len={ep_l:>5}  avoided={avoided}")
 
                         episode_count += 1
                         tb_writer.add_scalar("episode/return", ep_r, episode_count)
                         tb_writer.add_scalar("episode/length", ep_l, episode_count)
+                        tb_writer.add_scalar("episode/obstacles_avoided", avoided, episode_count)
                         tb_writer.add_scalar("episode/return_vs_step", ep_r, global_step)
                         tb_writer.add_scalar("episode/length_vs_step", ep_l, global_step)
+                        tb_writer.add_scalar("episode/obstacles_avoided_vs_step", avoided, global_step)
+
+                        # (Episode-based milestones removed; now recording based on total steps)
 
             if obs_norm is not None:
                 obs_norm.update(next_obs)
@@ -340,6 +397,14 @@ def ppo_train(cfg: PPOConfig):
 
     envs.close()
     tb_writer.close()
+
+    # If training ended before any milestone was reached, record one video at 100%
+    if len(recorded_step_milestones) == 0 and episode_count > 0:
+        try:
+            record_policy_video(100)
+        except Exception as e:
+            logger.warning(f"Final video recording failed at 100%: {e}")
+
     logger.info("Training done.")
 
 
