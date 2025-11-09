@@ -28,17 +28,37 @@ class ChromeDinoEnv(gym.Env):
     metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 30}
 
     def __init__(
-            self,
-            render_mode: Optional[str] = None,
-            max_episode_steps: int = 3000,
-            frame_skip: int = 2,
-            alive_reward: float = 0.1,
-            milestone_points: int = 0,
-            milestone_bonus: float = 0.0,  # small bonus
-            death_penalty: float = -1.0,
-            avoid_reward: float = 1.0,  # Reward for successfully avoiding an obstacle
-            speed_increases: bool = False,
-            seed: Optional[int] = None
+        self,
+        render_mode: Optional[str] = None,
+        max_episode_steps: int = 3000,
+        frame_skip: int = 2,
+
+        # Base rewards
+        alive_reward: float = 0.1,
+        death_penalty: float = -1.0,
+        avoid_reward: float = 0.0,   # (start at 0.0; you can raise later)
+
+        # Milestones (optional)
+        milestone_points: int = 0,
+        milestone_bonus: float = 0.0,
+
+        # Game dynamics
+        speed_increases: bool = False,
+
+        # Duck learning aids
+        spawn_probs: tuple = (0.3, 0.2, 0.5),  # small, large, bird
+        bird_only_phase: bool = False,         # curriculum: spawn only birds
+        duck_window_ttc: tuple = (6, 24),      # frames window near bird
+        duck_bonus: float = 0.3,               # +r if duck within window
+        wrong_jump_penalty: float = 0.2,       # -r if jump within window
+        idle_duck_penalty: float = 0.01,       # -r per frame ducking w/out need
+        airtime_penalty: float = 0.005,        # -r per frame airborne w/out need
+
+        # Obs normalization caps (can be overridden by trainer)
+        obs_speed_cap: float = 100.0,
+        obs_ttc_cap: float = 300.0,
+
+        seed: Optional[int] = None,
     ):
         super().__init__()
 
@@ -52,7 +72,7 @@ class ChromeDinoEnv(gym.Env):
             self.SCREEN = pygame.display.set_mode((self._w, self._h))
             pygame.display.set_caption("Chrome Dino Runner - RL Environment")
         else:
-            # Offscreen surface (width, height) — not (height, width)
+            # Offscreen surface (width, height)
             self.SCREEN = pygame.Surface((self._w, self._h))
 
         # Load game assets
@@ -72,7 +92,7 @@ class ChromeDinoEnv(gym.Env):
 
         # ----- RL spaces -----
         self.action_space = spaces.Discrete(3)  # 0 noop, 1 jump, 2 duck
-        # Observation shape: [y, vy, rel_x, rel_y, onehot(3), speed, ttc, airborne]
+        # Observation shape: [y_n, vy_n, rel_x_n, rel_y_n, onehot(3), speed_n, ttc_n, airborne]
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32)
 
         # Rewards & rollout control
@@ -84,10 +104,23 @@ class ChromeDinoEnv(gym.Env):
         self._max_episode_steps = int(max_episode_steps)
         self._frame_skip = int(frame_skip)
 
+        # Duck curriculum + shaping
+        self._spawn_probs = np.array(spawn_probs, dtype=np.float64)
+        self._spawn_probs = self._spawn_probs / self._spawn_probs.sum()
+        self._bird_only_phase = bool(bird_only_phase)
+        self._duck_ttc_lo, self._duck_ttc_hi = duck_window_ttc
+        self._duck_bonus = float(duck_bonus)
+        self._wrong_jump_penalty = float(wrong_jump_penalty)
+        self._idle_duck_penalty = float(idle_duck_penalty)
+        self._airtime_penalty = float(airtime_penalty)
+
+        # Observation caps
+        self._obs_speed_cap = float(obs_speed_cap)
+        self._obs_ttc_cap = float(obs_ttc_cap)
+
         # Bookkeeping
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)  # for vy finite diff
-        self._prev_obstacle_ids = set()  # Track obstacles from previous step for avoidance rewards
         self._avoided_this_episode = 0  # Count obstacles the dino successfully passed
 
         # Seeding
@@ -99,17 +132,7 @@ class ChromeDinoEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         """
         Build a normalized 10-D observation vector:
-        [ y_n, vy_n, rel_x_n, rel_y_n, onehot_s, onehot_l, onehot_b, speed_n, ttc_n, airborne ]
-
-        where:
-        y_n      : dino vertical position / screen height  (0..1)
-        vy_n     : vertical velocity (positive = moving up) / screen height
-        rel_x_n  : horizontal distance to nearest obstacle / screen width (0..1)
-        rel_y_n  : vertical offset to nearest obstacle / screen height (-1..1)
-        onehot_* : obstacle type one-hot (small cactus, large cactus, bird)
-        speed_n  : game speed normalized by a cap (default 100)
-        ttc_n    : time-to-collision (frames) normalized by a cap (default 300)
-        airborne : 1.0 if dino is airborne else 0.0
+          [ y_n, vy_n, rel_x_n, rel_y_n, onehot_s, onehot_l, onehot_b, speed_n, ttc_n, airborne ]
         """
         dino_rect = self.player.dino_rect
         y = float(dino_rect.y)
@@ -141,10 +164,6 @@ class ChromeDinoEnv(gym.Env):
         onehot = np.zeros(3, dtype=np.float32)
         onehot[t] = 1.0
 
-        # configurable caps (fallback to sensible defaults if not set on self)
-        speed_cap = getattr(self, "_obs_speed_cap", 100.0)   # denominator for speed_n
-        ttc_cap   = getattr(self, "_obs_ttc_cap",   300.0)   # denominator for ttc_n
-
         # normalization by screen size (keeps values ~[-1,1])
         y_n     = y  / float(self._h)
         vy_n    = vy / float(self._h)
@@ -153,16 +172,15 @@ class ChromeDinoEnv(gym.Env):
 
         # normalized speed
         speed = float(self.game_state.game_speed)
-        speed_n = float(np.clip(speed / speed_cap, 0.0, 1.0))
+        speed_n = float(np.clip(speed / self._obs_speed_cap, 0.0, 1.0))
 
         # time-to-collision (frames). If no obstacle, use max cap.
-        # add small eps to avoid division by zero at very low speeds
         eps = 1e-6
         if nearest is not None and speed > eps:
             ttc = rel_x / max(speed, eps)
         else:
-            ttc = ttc_cap
-        ttc_n = float(np.clip(ttc / ttc_cap, 0.0, 1.0))
+            ttc = self._obs_ttc_cap
+        ttc_n = float(np.clip(ttc / self._obs_ttc_cap, 0.0, 1.0))
 
         airborne = 1.0 if self._is_airborne() else 0.0
 
@@ -172,8 +190,6 @@ class ChromeDinoEnv(gym.Env):
         )
         return obs
 
-
-
     def _get_info(self) -> Dict[str, Any]:
         return {
             'score': int(self.game_state.points),
@@ -182,8 +198,7 @@ class ChromeDinoEnv(gym.Env):
         }
 
     # ---------- Gym API ----------
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[
-        np.ndarray, Dict[str, Any]]:
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
         super().reset(seed=seed)
 
         if seed is not None:
@@ -195,7 +210,6 @@ class ChromeDinoEnv(gym.Env):
         self.player = Dinosaur(self.ASSETS["RUNNING"], self.ASSETS["JUMPING"], self.ASSETS["DUCKING"])
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)
-        self._prev_obstacle_ids = set()
         self._avoided_this_episode = 0
 
         # Optional: clear screen for human mode
@@ -213,10 +227,6 @@ class ChromeDinoEnv(gym.Env):
         # apply action intent once, then update multiple frames (frame skip)
         self._apply_action(action)
 
-        # Track obstacles at start of step (before any updates)
-        dino_x = float(self.player.dino_rect.x)
-        obstacles_ahead_at_start = {id(o): o.rect.x for o in self.game_state.obstacles if o.rect.x >= dino_x}
-        
         for _ in range(self._frame_skip):
             # update player
             self._update_player()
@@ -231,14 +241,29 @@ class ChromeDinoEnv(gym.Env):
                 break
 
             # Reward for successfully avoiding obstacles (passed behind dino)
-            # Use a per-obstacle flag to ensure we count each obstacle once.
             for ob in self.game_state.obstacles:
-                passed = (ob.rect.x + ob.rect.width) < dino_x
+                passed = (ob.rect.x + ob.rect.width) < float(self.player.dino_rect.x)
                 already_counted = getattr(ob, "_passed_counted", False)
                 if passed and not already_counted:
                     setattr(ob, "_passed_counted", True)
                     reward += self._avoid_reward
                     self._avoided_this_episode += 1
+
+            # ---- contextual duck shaping ----
+            rel_x_b, rel_y_b, ttc_b = self._nearest_bird_info()
+            if ttc_b is not None:
+                if self._duck_ttc_lo <= ttc_b <= self._duck_ttc_hi:
+                    if action == 2 and not self._is_airborne():
+                        reward += self._duck_bonus
+                    elif action == 1:
+                        reward -= self._wrong_jump_penalty
+
+            # gentle regularizers to avoid degenerate policies
+            need_duck = (ttc_b is not None) and (self._duck_ttc_lo <= ttc_b <= self._duck_ttc_hi)
+            if self._is_airborne() and not need_duck:
+                reward -= self._airtime_penalty
+            if (getattr(self.player, "dino_duck", False)) and not need_duck:
+                reward -= self._idle_duck_penalty
 
             # score and speed
             prev_points = self.game_state.points
@@ -251,10 +276,6 @@ class ChromeDinoEnv(gym.Env):
             if self.render_mode == "human":
                 self._render_frame()
                 self._pump_events()
-        
-        # Update obstacle tracking for next step (after all frame skips)
-        dino_x_final = float(self.player.dino_rect.x)
-        self._prev_obstacle_ids = {id(o) for o in self.game_state.obstacles if o.rect.x >= dino_x_final}
 
         # horizon truncation
         self._steps += 1
@@ -274,7 +295,7 @@ class ChromeDinoEnv(gym.Env):
             self._render_frame()
             self._pump_events()
         elif self.render_mode == "rgb_array":
-            # Draw a fresh frame before capturing to avoid visual artifacts
+            # draw fresh frame before capture
             self._render_frame()
             arr = pygame.surfarray.array3d(self.SCREEN)  # (W, H, 3)
             return np.transpose(arr, (1, 0, 2))  # (H, W, 3)
@@ -314,14 +335,16 @@ class ChromeDinoEnv(gym.Env):
         up    = (action == 1) and grounded
         down  = (action == 2) and grounded
         space = up  # typical mapping: jump = up/space
-
         self.player.update(_KeyProxy(up, down, space))
-
 
     def _spawn_and_update_obstacles(self) -> None:
         # spawn if none
         if len(self.game_state.obstacles) == 0:
-            typ = self.np_random.integers(0, 3)
+            if self._bird_only_phase:
+                typ = 2
+            else:
+                typ = int(self.np_random.choice([0, 1, 2], p=self._spawn_probs))
+
             if typ == 0:
                 self.game_state.obstacles.append(SmallCactus(self.ASSETS["SMALL_CACTUS"]))
             elif typ == 1:
@@ -338,6 +361,20 @@ class ChromeDinoEnv(gym.Env):
         # background scroll
         self._update_background()
 
+    def _nearest_bird_info(self):
+        """Return (rel_x, rel_y, ttc_frames) for the nearest bird ahead or (None, None, None)."""
+        dino_x = float(self.player.dino_rect.x)
+        ahead_birds = [o for o in self.game_state.obstacles
+                       if isinstance(o, Bird) and o.rect.x >= dino_x]
+        if not ahead_birds:
+            return None, None, None
+        nearest = min(ahead_birds, key=lambda o: o.rect.x)
+        rel_x = float(nearest.rect.x - dino_x)
+        rel_y = float(nearest.rect.y - self.player.dino_rect.y)
+        speed = max(float(self.game_state.game_speed), 1e-6)
+        ttc = rel_x / speed
+        return rel_x, rel_y, ttc
+
     def _update_player(self) -> None:
         try:
             self.player.update(None)  # allow None if you modified Dinosaur.update
@@ -345,7 +382,6 @@ class ChromeDinoEnv(gym.Env):
             class _NullKeys:
                 def __getitem__(self, key: int) -> bool:
                     return False
-
             self.player.update(_NullKeys())
 
     def _update_background(self) -> None:

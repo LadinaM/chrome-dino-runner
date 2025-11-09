@@ -1,3 +1,4 @@
+from typing import Literal
 import warnings
 warnings.filterwarnings("ignore", module="pygame.pkgdata")
 warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
@@ -11,9 +12,6 @@ import os
 import time
 from dataclasses import dataclass
 
-from utilities.helpers import make_env
-from utilities.observations import set_seed, ObsNorm
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,7 +19,10 @@ import torch.optim as optim
 from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
 from gymnasium.wrappers import RecordVideo
 from torch.utils.tensorboard import SummaryWriter
-from chrome_dino_env import ChromeDinoEnv
+
+from utilities.helpers import make_env
+from utilities.observations import set_seed, ObsNorm
+from chrome_dino_env import ChromeDinoEnv  # only used for video eval
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,10 +69,11 @@ class PpoModel(nn.Module):
         return logp, entropy, value
 
 
+
 @dataclass
 class PPOConfig:
     seed: int = 42
-    total_timesteps: int = 1_000_000
+    total_timesteps: int = 6_000_000
     n_envs: int = 8
     n_steps: int = 2048         # per env
     gamma: float = 0.99
@@ -92,19 +94,24 @@ class PPOConfig:
     save_path: str = "./dino_ppo.pt"
     vec_backend: str = "async"  # "sync" or "async"
     minibatch_size: int = 256
-    speed_increases: bool = False  # Whether game speed increases over time
-    alive_reward: float = 1.0      # Reward for staying alive per step
-    death_penalty: float = -100.0  # Penalty for dying
-    avoid_reward: float = 20.0     # Reward for successfully avoiding an obstacle
-    milestone_points: int = 10     # Score threshold for milestone bonus
-    milestone_bonus: float = 20.0  # Bonus reward when reaching score milestones
+
+    # Base env rewards/dynamics (fallbacks for non-curriculum mode)
+    speed_increases: bool = False
+    alive_reward: float = 1.0
+    death_penalty: float = -100.0
+    avoid_reward: float = 20.0
+    milestone_points: int = 10
+    milestone_bonus: float = 20.0
+
+    # Auto-curriculum toggle
+    auto_curriculum: bool = True
 
 
 def ppo_train(cfg: PPOConfig):
     set_seed(cfg.seed)
     os.makedirs(cfg.log_dir, exist_ok=True)
-
     tb_writer = SummaryWriter(log_dir=cfg.log_dir)
+
     # Unique run-specific video directory to avoid overwrite warnings
     run_id = time.strftime("%Y%m%d-%H%M%S")
     video_dir = os.path.join(cfg.log_dir, "videos", run_id)
@@ -114,59 +121,99 @@ def ppo_train(cfg: PPOConfig):
     video_step_milestones = {int(cfg.total_timesteps * p): int(p * 100) for p in milestone_percents}
     recorded_step_milestones = set()
 
-    def record_policy_video(episode_num: int, max_steps: int = 5000):
-        """Run a single evaluation episode and save a video."""
-        fname = f"episode_{episode_num}"
-        logger.info(f"Recording video for episode {episode_num}...")
-        eval_env = ChromeDinoEnv(
-            render_mode="rgb_array",
+    # ---- Automatic curriculum phases (by % of total timesteps)
+    # Phase 0: birds only, fixed speed (teach duck)
+    # Phase 1: mix in cacti, still fixed speed
+    # Phase 2: mix + speed increases on
+    phase_schedule = [
+        (0.00, {  # 0% – 30%
+            "frame_skip": 1,
+            "speed_increases": False,
+            "spawn_probs": (0.0, 0.0, 1.0),  # birds only
+            "bird_only_phase": True,
+            # shaping
+            "duck_window_ttc": (6, 24),
+            "duck_bonus": 0.3,
+            "wrong_jump_penalty": 0.2,
+            "idle_duck_penalty": 0.01,
+            "airtime_penalty": 0.005,
+            # obs caps
+            "obs_speed_cap": 100.0,
+            "obs_ttc_cap": 300.0,
+            # base rewards (gentle)
+            "alive_reward": 0.05,
+            "death_penalty": -1.0,
+            "avoid_reward": 0.0,
+            "milestone_points": 0,
+            "milestone_bonus": 0.0,
+        }),
+        (0.1, {  # 10% – 60%
+            "frame_skip": 1,
+            "speed_increases": False,
+            "spawn_probs": (0.3, 0.2, 0.5),  # mix in cacti
+            "bird_only_phase": False,
+            "duck_window_ttc": (6, 24),
+            "duck_bonus": 0.25,
+            "wrong_jump_penalty": 0.15,
+            "idle_duck_penalty": 0.01,
+            "airtime_penalty": 0.004,
+            "alive_reward": 0.05,
+            "death_penalty": -1.0,
+            "avoid_reward": 0.0,
+            "milestone_points": 0,
+            "milestone_bonus": 0.0,
+        }),
+        (0.6, {  # 60% – 100%
+            "frame_skip": 1,
+            "speed_increases": True,        # turn on speed progression
+            "spawn_probs": (0.4, 0.2, 0.4),
+            "bird_only_phase": False,
+            "duck_window_ttc": (6, 24),
+            "duck_bonus": 0.2,              # decay shaping
+            "wrong_jump_penalty": 0.1,
+            "idle_duck_penalty": 0.005,
+            "airtime_penalty": 0.003,
+            "alive_reward": 0.05,
+            "death_penalty": -1.0,
+            "avoid_reward": 0.0,
+            "milestone_points": 0,
+            "milestone_bonus": 0.0,
+        }),
+    ]
+    phase_thresholds = [(int(cfg.total_timesteps * frac), kwargs) for frac, kwargs in phase_schedule]
+    current_phase_idx = 0
+    current_phase_kwargs = phase_thresholds[current_phase_idx][1]
+
+    # If auto-curriculum is disabled, build a single-phase kwargs from cfg
+    if not cfg.auto_curriculum:
+        current_phase_kwargs = dict[str, int | tuple[float, float, float] | tuple[Literal[6], Literal[24]] | float](
             frame_skip=1,
             speed_increases=cfg.speed_increases,
+            spawn_probs=(0.3, 0.2, 0.5),
+            bird_only_phase=False,
+            duck_window_ttc=(6, 24),
+            duck_bonus=0.0,
+            wrong_jump_penalty=0.0,
+            idle_duck_penalty=0.0,
+            airtime_penalty=0.0,
+            obs_speed_cap=100.0,
+            obs_ttc_cap=300.0,
             alive_reward=cfg.alive_reward,
             death_penalty=cfg.death_penalty,
             avoid_reward=cfg.avoid_reward,
             milestone_points=cfg.milestone_points,
             milestone_bonus=cfg.milestone_bonus,
-            seed=cfg.seed,
         )
-        rec_env = RecordVideo(eval_env, video_folder=video_dir, name_prefix=fname)
-        obs, _ = rec_env.reset(seed=cfg.seed)
-        done = False
-        steps = 0
-        while not done and steps < max_steps:
-            if obs_norm is not None:
-                obs = obs_norm.normalize(obs)
-            with torch.no_grad():
-                x = torch.as_tensor(obs, dtype=torch.float32, device=cfg.device).unsqueeze(0)
-                logits, _ = model(x)
-                action = int(torch.argmax(logits, dim=-1).item())  # deterministic for clarity
-            obs, _, term, trunc, _ = rec_env.step(action)
-            done = bool(term or trunc)
-            steps += 1
-        rec_env.close()
-        logger.info(f"Saved video: {os.path.join(video_dir, fname)}.*")
 
-    # ---- Vectorized envs
-    if cfg.vec_backend == "async" and cfg.n_envs > 1:
-        envs = AsyncVectorEnv([
-            make_env(i, cfg.seed,
-                     speed_increases=cfg.speed_increases,
-                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty,
-                     avoid_reward=cfg.avoid_reward, milestone_points=cfg.milestone_points,
-                     milestone_bonus=cfg.milestone_bonus)
-            for i in range(cfg.n_envs)
-        ])
-    else:
-        envs = SyncVectorEnv([
-            make_env(i, cfg.seed,
-                     speed_increases=cfg.speed_increases,
-                     alive_reward=cfg.alive_reward, death_penalty=cfg.death_penalty,
-                     avoid_reward=cfg.avoid_reward, milestone_points=cfg.milestone_points,
-                     milestone_bonus=cfg.milestone_bonus)
-            for i in range(cfg.n_envs)
-        ])
+    # Vector env builder
+    def build_envs(phase_kwargs):
+        if cfg.vec_backend == "async" and cfg.n_envs > 1:
+            return AsyncVectorEnv([make_env(i, cfg.seed, **phase_kwargs) for i in range(cfg.n_envs)])
+        else:
+            return SyncVectorEnv([make_env(i, cfg.seed, **phase_kwargs) for i in range(cfg.n_envs)])
 
-    # Reset: Gymnasium vector returns (obs, infos)
+    # Initial envs
+    envs = build_envs(current_phase_kwargs)
     next_obs, _ = envs.reset(seed=cfg.seed)
     obs_dim = next_obs.shape[1]
     act_dim = envs.single_action_space.n
@@ -200,6 +247,28 @@ def ppo_train(cfg: PPOConfig):
     updates = math.ceil(cfg.total_timesteps / batch_size)
     episode_count = 0
 
+    # Video helper uses the *current phase* kwargs so eval matches training conditions
+    def record_policy_video(tag_percent: int, max_steps: int = 5000):
+        fname = f"at_{tag_percent}pct"
+        logger.info(f"Recording video at {tag_percent}%...")
+        eval_env = ChromeDinoEnv(render_mode="rgb_array", seed=cfg.seed, **current_phase_kwargs)
+        rec_env = RecordVideo(eval_env, video_folder=video_dir, name_prefix=fname)
+        obs, _ = rec_env.reset(seed=cfg.seed)
+        done = False
+        steps = 0
+        while not done and steps < max_steps:
+            if obs_norm is not None:
+                obs = obs_norm.normalize(obs)
+            with torch.no_grad():
+                x = torch.as_tensor(obs, dtype=torch.float32, device=cfg.device).unsqueeze(0)
+                logits, _ = model(x)
+                action = int(torch.argmax(logits, dim=-1).item())  # deterministic for clarity
+            obs, _, term, trunc, _ = rec_env.step(action)
+            done = bool(term or trunc)
+            steps += 1
+        rec_env.close()
+        logger.info(f"Saved video: {os.path.join(video_dir, fname)}.*")
+
     for update in range(1, updates + 1):
         # LR schedule
         if cfg.linear_lr:
@@ -214,6 +283,23 @@ def ppo_train(cfg: PPOConfig):
         for step in range(num_steps):
             global_step += cfg.n_envs
             obs_buf[step] = next_obs
+
+            # ---- Auto-curriculum phase switching ----
+            if cfg.auto_curriculum:
+                next_phase_idx = current_phase_idx
+                for i, (th_step, kwargs) in enumerate(phase_thresholds):
+                    if global_step >= th_step:
+                        next_phase_idx = i
+                if next_phase_idx != current_phase_idx:
+                    current_phase_idx = next_phase_idx
+                    current_phase_kwargs = phase_thresholds[current_phase_idx][1]
+                    logger.info(f"Switching to phase {current_phase_idx} at step {global_step} with kwargs={current_phase_kwargs}")
+                    envs.close()
+                    envs = build_envs(current_phase_kwargs)
+                    next_obs, _ = envs.reset(seed=cfg.seed)
+                    if obs_norm is not None:
+                        obs_norm.update(next_obs)
+                        next_obs = obs_norm.normalize(next_obs)
 
             # Check step-based video milestones (relative to total timesteps)
             for ms_step, ms_pct in video_step_milestones.items():
@@ -238,7 +324,7 @@ def ppo_train(cfg: PPOConfig):
             next_obs, rewards, terminations, truncations, infos = envs.step(action_np)
             dones = np.logical_or(terminations, truncations).astype(np.float32)
 
-            # Store current transition (FIXED: use current dones)
+            # Store current transition
             act_buf[step] = action_np
             logp_buf[step] = logp_np
             val_buf[step] = value_np
@@ -266,8 +352,6 @@ def ppo_train(cfg: PPOConfig):
                         tb_writer.add_scalar("episode/return_vs_step", ep_r, global_step)
                         tb_writer.add_scalar("episode/length_vs_step", ep_l, global_step)
                         tb_writer.add_scalar("episode/obstacles_avoided_vs_step", avoided, global_step)
-
-                        # (Episode-based milestones removed; now recording based on total steps)
 
             if obs_norm is not None:
                 obs_norm.update(next_obs)
@@ -399,7 +483,7 @@ def ppo_train(cfg: PPOConfig):
     tb_writer.close()
 
     # If training ended before any milestone was reached, record one video at 100%
-    if len(recorded_step_milestones) == 0 and episode_count > 0:
+    if len(recorded_step_milestones) == 0:
         try:
             record_policy_video(100)
         except Exception as e:
@@ -413,7 +497,6 @@ def ppo_train(cfg: PPOConfig):
 # ----------------------------
 def parse_args() -> PPOConfig:
     defaults = PPOConfig()
-
     p = argparse.ArgumentParser()
     p.add_argument("--seed", type=int, default=defaults.seed)
     p.add_argument("--total-timesteps", type=int, default=defaults.total_timesteps)
@@ -436,12 +519,13 @@ def parse_args() -> PPOConfig:
     p.add_argument("--save-path", type=str, default=defaults.save_path)
     p.add_argument("--log-dir", type=str, default=defaults.log_dir)
     p.add_argument("--minibatch-size", type=int, default=defaults.minibatch_size)
-    p.add_argument("--no-speed-increases", action="store_true", help="Disable game speed increases over time")
-    p.add_argument("--alive-reward", type=float, default=defaults.alive_reward, help="Reward for staying alive per step")
-    p.add_argument("--death-penalty", type=float, default=defaults.death_penalty, help="Penalty for dying")
-    p.add_argument("--avoid-reward", type=float, default=defaults.avoid_reward, help="Reward for successfully avoiding an obstacle")
-    p.add_argument("--milestone-points", type=int, default=defaults.milestone_points, help="Score threshold for milestone bonus")
-    p.add_argument("--milestone-bonus", type=float, default=defaults.milestone_bonus, help="Bonus reward when reaching score milestones")
+    p.add_argument("--no-auto-curriculum", action="store_true", help="Disable automatic phase schedule")
+    # fallback single-phase (only used when --no-auto-curriculum)
+    p.add_argument("--alive-reward", type=float, default=defaults.alive_reward)
+    p.add_argument("--death-penalty", type=float, default=defaults.death_penalty)
+    p.add_argument("--avoid-reward", type=float, default=defaults.avoid_reward)
+    p.add_argument("--milestone-points", type=int, default=defaults.milestone_points)
+    p.add_argument("--milestone-bonus", type=float, default=defaults.milestone_bonus)
 
     a = p.parse_args()
     return PPOConfig(
@@ -466,7 +550,8 @@ def parse_args() -> PPOConfig:
         save_path=a.save_path,
         log_dir=a.log_dir,
         minibatch_size=a.minibatch_size,
-        speed_increases=not a.no_speed_increases,
+        auto_curriculum=not a.no_auto_curriculum,
+        # single-phase fallbacks
         alive_reward=a.alive_reward,
         death_penalty=a.death_penalty,
         avoid_reward=a.avoid_reward,
