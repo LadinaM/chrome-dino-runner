@@ -147,7 +147,7 @@ def ppo_train(cfg: PPOConfig):
             "milestone_points": 0,
             "milestone_bonus": 0.0,
         }),
-        (0.1, {  # 10% – 60%
+        (0.05, {  # 10% – 60%
             "frame_skip": 1,
             "speed_increases": False,
             "spawn_probs": (0.3, 0.2, 0.5),  # mix in cacti
@@ -163,7 +163,7 @@ def ppo_train(cfg: PPOConfig):
             "milestone_points": 0,
             "milestone_bonus": 0.0,
         }),
-        (0.6, {  # 60% – 100%
+        (0.5, {  # 60% – 100%
             "frame_skip": 1,
             "speed_increases": True,        # turn on speed progression
             "spawn_probs": (0.4, 0.2, 0.4),
