@@ -33,12 +33,14 @@ class LargeCactus(Obstacle):
 
 
 class Bird(Obstacle):
-    BIRD_HEIGHTS = [200, 280, 330, 350]
-
     def __init__(self, image):
         self.type = 0
         super().__init__(image, self.type)
-        self.rect.y = random.choice(self.BIRD_HEIGHTS)
+        # Force birds to be low enough that the dino must duck:
+        min_bottom = 312
+        max_bottom = 338
+        bottom = random.randint(min_bottom, max_bottom)
+        self.rect.y = max(0, bottom - self.rect.height)
         self.index = 0
 
     def draw(self, SCREEN):

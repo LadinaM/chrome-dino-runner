@@ -1,9 +1,13 @@
-# utilities/helpers.py
+from typing import Callable
+
+import gymnasium as gym
 from gymnasium.wrappers import RecordEpisodeStatistics
+
 from chrome_dino_env import ChromeDinoEnv
 
+
 def get_high_score():
-    """Read the high score from score.txt file"""
+    """Read the high score from score.txt file (human game mode use)."""
     try:
         with open("score.txt", "r") as f:
             content = f.read().strip()
@@ -15,62 +19,39 @@ def get_high_score():
     except (FileNotFoundError, ValueError):
         return 0
 
-def make_env(rank, seed, **kwargs):
+
+def make_env(rank: int, seed: int, **kwargs) -> Callable[[], gym.Env]:
     """
-    Factory that builds a ChromeDinoEnv with curriculum/shaping knobs.
-
-    Known kwargs (all optional; sensible defaults set here):
-      frame_skip:int=1
-      speed_increases:bool=True
-      alive_reward:float=0.05
-      avoid_reward:float=0.0
-      death_penalty:float=-1.0
-      milestone_points:int=0
-      milestone_bonus:float=0.0
-
-      # Curriculum / spawn
-      spawn_probs:tuple=(0.3,0.2,0.5)   # small, large, bird
-      bird_only_phase:bool=False
-
-      # Duck shaping
-      duck_window_ttc:tuple=(6,24)
-      duck_bonus:float=0.3
-      wrong_jump_penalty:float=0.2
-      idle_duck_penalty:float=0.01
-      airtime_penalty:float=0.005
-
-      # Observation normalization caps
-      obs_speed_cap:float=100.0
-      obs_ttc_cap:float=300.0
+    Factory for vectorized environments. All curriculum/phase kwargs are passed through.
+    Expected kwargs (all optional, with sensible defaults in ChromeDinoEnv):
+      - frame_skip: int
+      - speed_increases: bool
+      - spawn_probs: tuple[float, float, float]
+      - alive_reward, death_penalty, avoid_reward, milestone_points, milestone_bonus: floats/ints
+      - duck_window_ttc: tuple[int, int]
+      - duck_bonus, wrong_jump_penalty, idle_duck_penalty, airtime_penalty: floats
+      - obs_speed_cap, obs_ttc_cap: floats
     """
     def thunk():
         env = ChromeDinoEnv(
             render_mode=None,
             frame_skip=kwargs.get("frame_skip", 1),
-            speed_increases=kwargs.get("speed_increases", True),
-
+            speed_increases=kwargs.get("speed_increases", False),
+            spawn_probs=kwargs.get("spawn_probs", (0.3, 0.2, 0.5)),
             alive_reward=kwargs.get("alive_reward", 0.05),
-            avoid_reward=kwargs.get("avoid_reward", 0.0),
             death_penalty=kwargs.get("death_penalty", -1.0),
+            avoid_reward=kwargs.get("avoid_reward", 0.0),
             milestone_points=kwargs.get("milestone_points", 0),
             milestone_bonus=kwargs.get("milestone_bonus", 0.0),
-
-            # curriculum & shaping
-            spawn_probs=kwargs.get("spawn_probs", (0.3, 0.2, 0.5)),
-            bird_only_phase=kwargs.get("bird_only_phase", False),
             duck_window_ttc=kwargs.get("duck_window_ttc", (6, 24)),
-            duck_bonus=kwargs.get("duck_bonus", 0.3),
-            wrong_jump_penalty=kwargs.get("wrong_jump_penalty", 0.2),
-            idle_duck_penalty=kwargs.get("idle_duck_penalty", 0.01),
-            airtime_penalty=kwargs.get("airtime_penalty", 0.005),
-
-            # obs caps
+            duck_bonus=kwargs.get("duck_bonus", 0.0),
+            wrong_jump_penalty=kwargs.get("wrong_jump_penalty", 0.0),
+            idle_duck_penalty=kwargs.get("idle_duck_penalty", 0.0),
+            airtime_penalty=kwargs.get("airtime_penalty", 0.0),
             obs_speed_cap=kwargs.get("obs_speed_cap", 100.0),
             obs_ttc_cap=kwargs.get("obs_ttc_cap", 300.0),
-
             seed=seed + rank,
         )
         env = RecordEpisodeStatistics(env, deque_size=1000)
         return env
     return thunk
-
