@@ -24,9 +24,9 @@ from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
 from gymnasium.wrappers import RecordVideo
 from torch.utils.tensorboard import SummaryWriter
 
-from utilities.helpers import make_env      # passes phase kwargs through
+from utilities.helpers import make_env      # must pass through phase kwargs
 from utilities.observations import set_seed, ObsNorm
-from chrome_dino_env import ChromeDinoEnv   # used for evaluation videos
+from chrome_dino_env import ChromeDinoEnv   # only used for evaluation video runs
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,20 +56,20 @@ class PpoModel(nn.Module):
             nn.Linear(hidden, 1),
         )
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         logits = self.policy(x)
         value = self.value(x).squeeze(-1)
         return logits, value
 
     @torch.no_grad()
-    def act(self, x: torch.Tensor):
+    def act(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         logits, value = self.forward(x)
         dist = torch.distributions.Categorical(logits=logits)
         action = dist.sample()
         logp = dist.log_prob(action)
         return action, logp, value
 
-    def eval_actions(self, x: torch.Tensor, actions: torch.Tensor):
+    def eval_actions(self, x: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         logits, value = self.forward(x)
         dist = torch.distributions.Categorical(logits=logits)
         logp = dist.log_prob(actions)
@@ -78,13 +78,13 @@ class PpoModel(nn.Module):
 
 
 # ----------------------------
-# Config (with curriculum)
+# Config (includes curriculum)
 # ----------------------------
 @dataclass
 class PPOConfig:
     # PPO core
     seed: int = 42
-    total_timesteps: int = 6_000_000
+    total_timesteps: int = 10_000_000
     n_envs: int = 16
     n_steps: int = 1024
     gamma: float = 0.99
@@ -101,7 +101,7 @@ class PPOConfig:
     torch_compile: bool = False
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     norm_obs: bool = True
-    minibatch_size: int = 1024  # mb <= n_envs*n_steps
+    minibatch_size: int = 1024  # tune to your GPU; mb <= n_envs*n_steps
 
     # Logging / I/O
     log_dir: str = "./pt_logs"
@@ -113,7 +113,7 @@ class PPOConfig:
     speed_increases: bool = False
     alive_reward: float = 0.05
     death_penalty: float = -1.0
-    avoid_reward: float = 0.01
+    avoid_reward: float = 0.0
     milestone_points: int = 0
     milestone_bonus: float = 0.0
     obs_speed_cap: float = 100.0
@@ -123,16 +123,11 @@ class PPOConfig:
     auto_curriculum: bool = True
 
     # Phase schedule as fractions of total_timesteps (monotonic)
-    # e.g., (0.0, 0.05, 0.50) means:
-    #   Phase 0 starts at   0% (birds only),
-    #   Phase 1 starts at   5% (mix, fixed speed),
-    #   Phase 2 starts at  50% (mix + speed increases)
     phase_breaks: Tuple[float, ...] = (0.0, 0.05, 0.50)
 
     # Kwargs per phase (must align with phase_breaks)
-    # These values are passed to ChromeDinoEnv via helpers.make_env(**kwargs)
     phase_kwargs: Tuple[Dict, ...] = field(default_factory=lambda: (
-        # Phase 0: birds only (teach duck hard)
+        # Phase 0: birds only (teach duck) – avoid_reward=0.0
         dict(
             frame_skip=1,
             speed_increases=False,
@@ -150,7 +145,7 @@ class PPOConfig:
             obs_speed_cap=100.0,
             obs_ttc_cap=300.0,
         ),
-        # Phase 1: mix, fixed speed
+        # Phase 1: mix, fixed speed – avoid_reward=0.01
         dict(
             frame_skip=1,
             speed_increases=False,
@@ -168,7 +163,7 @@ class PPOConfig:
             obs_speed_cap=100.0,
             obs_ttc_cap=300.0,
         ),
-        # Phase 2: mix + speed increases
+        # Phase 2: mix + speed increases – avoid_reward=0.01
         dict(
             frame_skip=1,
             speed_increases=True,
@@ -190,12 +185,12 @@ class PPOConfig:
 
     # ------- Skill-gated promotion knobs (phase 0 -> 1) -------
     skill_window_episodes: int = 400
-    min_duck_rate_p0: float = 0.20   # >=20% of actions are duck in Phase 0
-    min_avoid_avg_p0: float = 1.0    # average avoided per episode (Phase 0)
+    min_duck_rate_p0: float = 0.20           # >=20% of actions are duck in Phase 0
+    min_avoid_avg_p0: float = 1.0            # average avoided per episode (Phase 0)
 
     # Optional early promotion Phase 1 -> 2, based on performance
-    min_return_avg_p1: float = 50.0  # average ep return threshold
-    min_duck_rate_p1: float = 0.08   # still demonstrate ducking sometimes
+    min_return_avg_p1: float = 50.0          # average ep return threshold
+    min_duck_rate_p1: float = 0.08           # still demonstrate ducking sometimes
 
 
 # ----------------------------
@@ -220,7 +215,6 @@ def ppo_train(cfg: PPOConfig):
             for frac, kwargs in zip(cfg.phase_breaks, cfg.phase_kwargs)
         ]
     else:
-        # single-phase fallback (no curriculum)
         thresholds = [(0, dict(
             frame_skip=cfg.frame_skip,
             speed_increases=cfg.speed_increases,
@@ -278,7 +272,6 @@ def ppo_train(cfg: PPOConfig):
     val_buf = np.zeros((steps_per_update, cfg.n_envs), dtype=np.float32)
 
     # ---------- Skill-gating bookkeeping ----------
-    # per-env counters to compute duck rate per finished episode
     per_env_duck_cnt = np.zeros(cfg.n_envs, dtype=np.int64)
     per_env_ep_len   = np.zeros(cfg.n_envs, dtype=np.int64)
 
@@ -288,22 +281,19 @@ def ppo_train(cfg: PPOConfig):
 
     def maybe_switch_phase(global_step: int):
         nonlocal envs, next_obs, phase_idx, phase_kwargs
-
-        # (A) threshold-based by step
         target_idx = phase_idx
         for i, (th, _) in enumerate(thresholds):
             if global_step >= th:
                 target_idx = i
 
-        # (B) skill-gated early promotions
-        # Phase 0 -> 1 if duck skill is good enough
+        # skill-gated 0 -> 1
         if cfg.auto_curriculum and phase_idx == 0 and len(duck_rate_hist) >= max(20, cfg.n_envs):
             avg_duck = float(np.mean(duck_rate_hist))
             avg_avoid = float(np.mean(avoided_hist)) if avoided_hist else 0.0
             if avg_duck >= cfg.min_duck_rate_p0 and avg_avoid >= cfg.min_avoid_avg_p0:
                 target_idx = max(target_idx, 1)
 
-        # Phase 1 -> 2 if performance is okay and some ducking remains
+        # skill-gated 1 -> 2
         if cfg.auto_curriculum and phase_idx == 1 and len(return_hist) >= max(20, cfg.n_envs):
             avg_ret = float(np.mean(return_hist))
             avg_duck = float(np.mean(duck_rate_hist)) if duck_rate_hist else 0.0
@@ -338,7 +328,7 @@ def ppo_train(cfg: PPOConfig):
                 obs = obs_norm.normalize(obs)
             x = torch.as_tensor(obs, dtype=torch.float32, device=cfg.device).unsqueeze(0)
             logits, _ = model(x)
-            action = int(torch.argmax(logits, dim=-1).item())  # deterministic
+            action = int(torch.argmax(logits, dim=-1).item())
             obs, _, term, trunc, _ = rec_env.step(action)
             done = bool(term or trunc)
             steps += 1
@@ -352,7 +342,6 @@ def ppo_train(cfg: PPOConfig):
     episode_counter = 0
 
     for update in range(1, updates + 1):
-        # LR annealing
         if cfg.linear_lr:
             frac = 1.0 - (update - 1) / updates
             for pg in optimizer.param_groups:
@@ -365,7 +354,6 @@ def ppo_train(cfg: PPOConfig):
             global_step += cfg.n_envs
             obs_buf[t] = next_obs
 
-            # Possibly switch curriculum phase
             maybe_switch_phase(global_step)
 
             # Milestone videos
@@ -396,15 +384,13 @@ def ppo_train(cfg: PPOConfig):
             rew_buf[t] = rewards
             done_buf[t] = dones
 
-            # Skill tracking
             per_env_ep_len += 1
             per_env_duck_cnt += (action_np == 2).astype(np.int64)
 
-            # Action histogram
             for a in action_np:
                 action_counts[int(a)] += 1
 
-            # Final episode infos (auto-reset)
+            # Final episode infos (auto-resets)
             final_infos = infos.get("final_info", None)
             if final_infos is not None:
                 for env_i, fi in enumerate(final_infos):
@@ -412,6 +398,9 @@ def ppo_train(cfg: PPOConfig):
                         ep_r = float(np.asarray(fi["episode"]["r"]).item())
                         ep_l = int(np.asarray(fi["episode"]["l"]).item())
                         avoided = int(fi.get("avoided_count", 0))
+                        avoided_bird = int(fi.get("avoided_bird", 0))
+                        avoided_other = int(fi.get("avoided_other", max(0, avoided - avoided_bird)))
+                        avoid_r_tot = float(fi.get("avoid_reward_total", 0.0))
 
                         ducks = int(per_env_duck_cnt[env_i])
                         drate = ducks / max(1, ep_l)
@@ -424,12 +413,19 @@ def ppo_train(cfg: PPOConfig):
 
                         episode_counter += 1
                         logger.info(
-                            f"[{global_step}] ep={episode_counter} ret={ep_r:8.1f} len={ep_l:5d} "
-                            f"avoided={avoided:3d} duck_rate={drate:.3f}"
+                            f"[{global_step}] ep={episode_counter} "
+                            f"return={ep_r:8.1f} len={ep_l:5d} "
+                            f"avoided={avoided:3d} (bird={avoided_bird}, other={avoided_other}) "
+                            f"duck_rate={drate:.3f} avoid_R={avoid_r_tot:.4f}"
                         )
+
+                        # TB episode scalars
                         tb.add_scalar("episode/return", ep_r, episode_counter)
                         tb.add_scalar("episode/length", ep_l, episode_counter)
                         tb.add_scalar("episode/avoided", avoided, episode_counter)
+                        tb.add_scalar("episode/avoided_bird", avoided_bird, episode_counter)
+                        tb.add_scalar("episode/avoided_other", avoided_other, episode_counter)
+                        tb.add_scalar("episode/avoid_reward_total", avoid_r_tot, episode_counter)
                         tb.add_scalar("episode/duck_rate", drate, episode_counter)
                         tb.add_scalar("episode/return_vs_step", ep_r, global_step)
                         tb.add_scalar("episode/length_vs_step", ep_l, global_step)
@@ -454,7 +450,7 @@ def ppo_train(cfg: PPOConfig):
             next_val = val_buf[t]
         ret_buf = adv_buf + val_buf
 
-        # ------- Flatten and PPO update -------
+        # ------- Flatten and update -------
         b_obs = torch.as_tensor(obs_buf.reshape(batch, obs_dim), device=cfg.device)
         b_act = torch.as_tensor(act_buf.reshape(batch), device=cfg.device)
         b_logp_old = torch.as_tensor(logp_buf.reshape(batch), device=cfg.device)
@@ -486,9 +482,7 @@ def ppo_train(cfg: PPOConfig):
                 policy_loss = -torch.min(surr1, surr2).mean()
 
                 if cfg.vf_clip_coef > 0:
-                    v_clipped = b_val_old[mb_inds] + (value - b_val_old[mb_inds]).clamp(
-                        -cfg.vf_clip_coef, cfg.vf_clip_coef
-                    )
+                    v_clipped = b_val_old[mb_inds] + (value - b_val_old[mb_inds]).clamp(-cfg.vf_clip_coef, cfg.vf_clip_coef)
                     v_loss_unclipped = (value - b_ret[mb_inds]) ** 2
                     v_loss_clipped = (v_clipped - b_ret[mb_inds]) ** 2
                     value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
@@ -542,7 +536,6 @@ def ppo_train(cfg: PPOConfig):
     envs.close()
     tb.close()
 
-    # If nothing recorded, do a final video
     if not recorded_steps:
         try:
             record_policy_video(100)
@@ -582,8 +575,7 @@ def parse_args() -> PPOConfig:
     p.add_argument("--minibatch-size", type=int, default=d.minibatch_size)
 
     # Curriculum toggle
-    p.add_argument("--no-auto-curriculum", action="store_true",
-                   help="Disable the multi-phase curriculum and use a single fixed environment.")
+    p.add_argument("--no-auto-curriculum", action="store_true")
 
     # Single-phase fallback knobs (only used if no-auto-curriculum)
     p.add_argument("--frame-skip", type=int, default=d.frame_skip)

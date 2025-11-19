@@ -121,6 +121,9 @@ class ChromeDinoEnv(gym.Env):
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)  # for vy
         self._avoided_this_episode = 0
+        self._avoided_bird = 0
+        self._avoided_other = 0
+        self._avoid_reward_accum = 0.0
         self._duck_skill = {"window": 0, "hits": 0}  # for skill-gated curriculum
 
         # -------------- RNG --------------
@@ -204,6 +207,9 @@ class ChromeDinoEnv(gym.Env):
         self._steps = 0
         self._prev_dino_y = float(self.player.dino_rect.y)
         self._avoided_this_episode = 0
+        self._avoided_bird = 0
+        self._avoided_other = 0
+        self._avoid_reward_accum = 0.0
         self._duck_skill = {"window": 0, "hits": 0}
 
         self._fill_bg()
@@ -254,8 +260,15 @@ class ChromeDinoEnv(gym.Env):
                 already_counted = getattr(ob, "_passed_counted", False)
                 if passed and not already_counted:
                     setattr(ob, "_passed_counted", True)
+                    # base avoid reward
                     reward += self._avoid_reward
+                    self._avoid_reward_accum += self._avoid_reward
                     self._avoided_this_episode += 1
+                    # bird vs non-bird stats
+                    if isinstance(ob, Bird):
+                        self._avoided_bird += 1
+                    else:
+                        self._avoided_other += 1
 
             # time-based rewards
             prev_points = self.game_state.points
@@ -296,9 +309,18 @@ class ChromeDinoEnv(gym.Env):
         info["episode_length"] = self._steps
         if terminated or truncated:
             info["avoided_count"] = int(self._avoided_this_episode)
+            info["avoided_bird"] = int(self._avoided_bird)
+            info["avoided_other"] = int(self._avoided_other)
+            info["avoid_reward_total"] = float(self._avoid_reward_accum)
             info["bird_window_total"] = int(self._duck_skill["window"])
             info["bird_duck_hits"] = int(self._duck_skill["hits"])
-            self._duck_skill = {"window": 0, "hits": 0}  # reset for next ep
+            # reset for next episode (in case env is reused)
+            self._duck_skill = {"window": 0, "hits": 0}
+            self._avoided_this_episode = 0
+            self._avoided_bird = 0
+            self._avoided_other = 0
+            self._avoid_reward_accum = 0.0
+
         return obs, float(reward), bool(terminated), bool(truncated), info
 
     # --------- Game helpers ----------------
@@ -351,7 +373,8 @@ class ChromeDinoEnv(gym.Env):
             self.player.update(None)
         except TypeError:
             class _NullKeys:
-                def __getitem__(self, key: int) -> bool: return False
+                def __getitem__(self, key: int) -> bool:
+                    return False
             self.player.update(_NullKeys())
 
     def _update_background(self) -> None:
