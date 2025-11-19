@@ -87,12 +87,12 @@ class PPOConfig:
     total_timesteps: int = 10_000_000
     n_envs: int = 16
     n_steps: int = 1024
-    gamma: float = 0.99
+    gamma: float = 0.995
     gae_lambda: float = 0.95
     update_epochs: int = 4
     clip_coef: float = 0.2
     vf_clip_coef: float = 0.2
-    ent_coef: float = 0.01
+    ent_coef: float = 0.02
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     lr: float = 2.5e-4
@@ -125,63 +125,64 @@ class PPOConfig:
     # Phase schedule as fractions of total_timesteps (monotonic)
     phase_breaks: Tuple[float, ...] = (0.0, 0.05, 0.50)
 
-    # Kwargs per phase (must align with phase_breaks)
+    # Kwargs per phase
     phase_kwargs: Tuple[Dict, ...] = field(default_factory=lambda: (
-        # Phase 0: birds only (teach duck) – avoid_reward=0.0
-        dict(
-            frame_skip=1,
-            speed_increases=False,
-            spawn_probs=(0.0, 0.0, 1.0),
-            duck_window_ttc=(6, 24),
-            duck_bonus=0.40,
-            wrong_jump_penalty=0.25,
-            idle_duck_penalty=0.01,
-            airtime_penalty=0.006,
-            alive_reward=0.03,
-            death_penalty=-1.0,
-            avoid_reward=0.0,
-            milestone_points=0,
-            milestone_bonus=0.0,
-            obs_speed_cap=100.0,
-            obs_ttc_cap=300.0,
-        ),
-        # Phase 1: mix, fixed speed – avoid_reward=0.01
-        dict(
-            frame_skip=1,
-            speed_increases=False,
-            spawn_probs=(0.30, 0.20, 0.50),
-            duck_window_ttc=(6, 24),
-            duck_bonus=0.25,
-            wrong_jump_penalty=0.15,
-            idle_duck_penalty=0.01,
-            airtime_penalty=0.004,
-            alive_reward=0.04,
-            death_penalty=-1.0,
-            avoid_reward=0.01,
-            milestone_points=0,
-            milestone_bonus=0.0,
-            obs_speed_cap=100.0,
-            obs_ttc_cap=300.0,
-        ),
-        # Phase 2: mix + speed increases – avoid_reward=0.01
-        dict(
-            frame_skip=1,
-            speed_increases=True,
-            spawn_probs=(0.40, 0.20, 0.40),
-            duck_window_ttc=(6, 24),
-            duck_bonus=0.15,
-            wrong_jump_penalty=0.10,
-            idle_duck_penalty=0.005,
-            airtime_penalty=0.003,
-            alive_reward=0.05,
-            death_penalty=-1.0,
-            avoid_reward=0.01,
-            milestone_points=0,
-            milestone_bonus=0.0,
-            obs_speed_cap=100.0,
-            obs_ttc_cap=300.0,
-        ),
-    ))
+    # Phase 0: birds only (teach duck)
+    dict(
+        frame_skip=1,
+        speed_increases=False,
+        spawn_probs=(0.0, 0.0, 1.0),
+        duck_window_ttc=(6, 24),
+        duck_bonus=0.40,
+        wrong_jump_penalty=0.25,
+        idle_duck_penalty=0.01,
+        airtime_penalty=0.006,
+        alive_reward=0.03,
+        death_penalty=-1.0,
+        avoid_reward=0.0,
+        milestone_points=0,
+        milestone_bonus=0.0,
+        obs_speed_cap=100.0,
+        obs_ttc_cap=300.0,
+    ),
+    # Phase 1: mix, fixed speed
+    dict(
+        frame_skip=1,
+        speed_increases=False,
+        spawn_probs=(0.30, 0.20, 0.50),
+        duck_window_ttc=(6, 24),
+        duck_bonus=0.20,
+        wrong_jump_penalty=0.10,
+        idle_duck_penalty=0.01,
+        airtime_penalty=0.004,
+        alive_reward=0.03,
+        death_penalty=-1.0,
+        avoid_reward=0.01, 
+        milestone_points=0,
+        milestone_bonus=0.0,
+        obs_speed_cap=100.0,
+        obs_ttc_cap=300.0,
+    ),
+    # Phase 2: mix + speed increases
+    dict(
+        frame_skip=1,
+        speed_increases=True,
+        spawn_probs=(0.40, 0.20, 0.40),
+        duck_window_ttc=(6, 24),
+        duck_bonus=0.10,
+        wrong_jump_penalty=0.05,
+        idle_duck_penalty=0.005,
+        airtime_penalty=0.003,
+        alive_reward=0.02,
+        death_penalty=-1.0,
+        avoid_reward=0.01,   # <--- changed
+        milestone_points=0,
+        milestone_bonus=0.0,
+        obs_speed_cap=100.0,
+        obs_ttc_cap=300.0,
+    ),
+))
+
 
     # ------- Skill-gated promotion knobs (phase 0 -> 1) -------
     skill_window_episodes: int = 400
@@ -348,6 +349,9 @@ def ppo_train(cfg: PPOConfig):
                 pg["lr"] = cfg.lr * frac
 
         action_counts = np.zeros(act_dim, dtype=np.int64)
+        # Simple entropy decay: from cfg.ent_coef to ~10% of it
+        ent_frac = 0.1 + 0.9 * (1.0 - (update - 1) / updates)
+        current_ent_coef = cfg.ent_coef * ent_frac
 
         # ------- Collect rollout -------
         for t in range(steps_per_update):
@@ -489,7 +493,8 @@ def ppo_train(cfg: PPOConfig):
                 else:
                     value_loss = 0.5 * (b_ret[mb_inds] - value).pow(2).mean()
 
-                loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
+                loss = policy_loss + cfg.vf_coef * value_loss - current_ent_coef * entropy
+
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
