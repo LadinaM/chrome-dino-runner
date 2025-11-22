@@ -129,7 +129,7 @@ TensorBoard provides real-time visualization of training metrics.
 1. **Start TensorBoard:**
 
 ```bash
-tensorboard --logdir=./pt_logs --port=6000
+tensorboard --logdir=./pt_logs --port=6006  --bind_all
 ```
 
 2. **View in browser:**
@@ -146,7 +146,7 @@ Open http://localhost:6006 in your web browser
 - **Actions** - Action distribution over time
 - **Environment Info** - Game speed, score, obstacle count
 
-#### Action Space:
+#### Action Space
 
 The RL environment supports 3 actions:
 
@@ -154,7 +154,7 @@ The RL environment supports 3 actions:
 - **Action 1**: Jump
 - **Action 2**: Duck
 
-#### Observation Space:
+#### Observation Space
 
 The agent receives a 6-dimensional state vector:
 
