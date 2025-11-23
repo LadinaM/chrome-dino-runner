@@ -199,12 +199,19 @@ class PPOConfig:
 # ----------------------------
 def ppo_train(cfg: PPOConfig):
     set_seed(cfg.seed)
-    os.makedirs(cfg.log_dir, exist_ok=True)
-    tb = SummaryWriter(log_dir=cfg.log_dir)
-
-    # ---------- Video setup ----------
+    # Each training run gets its own subdirectory under cfg.log_dir so that
+    # TensorBoard, checkpoints, and videos are neatly grouped per run.
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    video_dir = os.path.join(cfg.log_dir, "videos", run_id)
+    run_dir = os.path.join(cfg.log_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+
+    tb = SummaryWriter(log_dir=run_dir)
+
+    # ---------- Video & checkpoint setup ----------
+    video_dir = os.path.join(run_dir, "videos")
+    os.makedirs(video_dir, exist_ok=True)
+    # Save final model/checkpoints inside this run directory
+    model_path = os.path.join(run_dir, os.path.basename(cfg.save_path))
     milestones = {int(cfg.total_timesteps * p): int(p * 100) for p in (0.10, 0.30, 0.60, 1.00)}
     recorded_steps = set()
 
@@ -532,9 +539,9 @@ def ppo_train(cfg: PPOConfig):
                     "clip": float(obs_norm.clip),
                 },
             }
-            torch.save(payload, cfg.save_path)
+            torch.save(payload, model_path)
             elapsed = time.time() - start_time
-            logger.info(f"[update {update}/{updates}] saved -> {cfg.save_path} | elapsed={elapsed/60:.1f} min")
+            logger.info(f"[update {update}/{updates}] saved -> {model_path} | elapsed={elapsed/60:.1f} min")
             tb.add_scalar("time/elapsed_minutes", elapsed / 60.0, global_step)
             tb.add_scalar("time/steps_per_second", global_step / max(1.0, elapsed), global_step)
 

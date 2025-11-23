@@ -9,6 +9,8 @@ import argparse
 import logging
 import numpy as np
 import torch
+import os
+import glob
 
 
 logging.basicConfig(
@@ -56,9 +58,66 @@ def load_checkpoint(path: str, obs_dim: int, act_dim: int, device: str = "cpu"):
 
 
 
+def find_latest_run_dir(log_dir: str) -> str | None:
+    if not os.path.isdir(log_dir):
+        return None
+    subdirs = [
+        os.path.join(log_dir, d)
+        for d in os.listdir(log_dir)
+        if os.path.isdir(os.path.join(log_dir, d))
+    ]
+    if not subdirs:
+        return None
+    # Sort by modification time descending (newest first)
+    subdirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return subdirs[0]
+
+
+def resolve_model_path(model_arg: str | None, log_dir: str, ckpt_name: str) -> str:
+    # If a model argument is given:
+    # - If it's a directory, assume it's a run directory; look for ckpt_name inside it
+    # - If it's a file, use it directly
+    if model_arg:
+        if os.path.isdir(model_arg):
+            candidate = os.path.join(model_arg, ckpt_name)
+        else:
+            candidate = model_arg
+        if os.path.isfile(candidate):
+            return candidate
+        # Fallback: pick the newest .pt in that directory if present
+        if os.path.isdir(model_arg):
+            pt_files = sorted(
+                glob.glob(os.path.join(model_arg, "*.pt")),
+                key=lambda p: os.path.getmtime(p),
+                reverse=True,
+            )
+            if pt_files:
+                return pt_files[0]
+        raise FileNotFoundError(f"Model file not found: {candidate}")
+
+    # Otherwise, load from the latest run directory under log_dir
+    run_dir = find_latest_run_dir(log_dir)
+    if run_dir is None:
+        raise FileNotFoundError(f"No runs found under log_dir: {log_dir}")
+    candidate = os.path.join(run_dir, ckpt_name)
+    if os.path.isfile(candidate):
+        return candidate
+    # Fallback: pick the newest .pt in that run directory
+    pt_files = sorted(
+        glob.glob(os.path.join(run_dir, "*.pt")),
+        key=lambda p: os.path.getmtime(p),
+        reverse=True,
+    )
+    if pt_files:
+        return pt_files[0]
+    raise FileNotFoundError(f"No checkpoint found in latest run: {run_dir}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", type=str, default="./dino_ppo.pt")
+    ap.add_argument("--model", type=str, default=None, help="Path to .pt file or a run directory. If omitted, loads the latest run.")
+    ap.add_argument("--log-dir", type=str, default="./pt_logs", help="Root directory containing per-run subdirectories.")
+    ap.add_argument("--ckpt-name", type=str, default="dino_ppo.pt", help="Expected checkpoint filename inside a run directory.")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
@@ -69,7 +128,9 @@ def main():
     obs_dim = obs.shape[-1]
     act_dim = env.action_space.n
 
-    model, obs_norm, cfg = load_checkpoint(args.model, obs_dim, act_dim, device=args.device)
+    model_path = resolve_model_path(args.model, args.log_dir, args.ckpt_name)
+    logger.info(f"Loading model from: {model_path}")
+    model, obs_norm, cfg = load_checkpoint(model_path, obs_dim, act_dim, device=args.device)
 
     for ep in range(args.episodes):
         obs, _ = env.reset()
