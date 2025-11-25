@@ -120,10 +120,11 @@ def main():
     ap.add_argument("--ckpt-name", type=str, default="dino_ppo.pt", help="Expected checkpoint filename inside a run directory.")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--max-episode-steps", type=int, default=3000, help="Time-limit per episode in environment steps.")
+    ap.add_argument("--speed-increase", action="store_true", default=False, help="Enable speed increases.")
     args = ap.parse_args()
 
-    # Human render env
-    env = ChromeDinoEnv(render_mode="human", seed=123)
+    env = ChromeDinoEnv(render_mode="human", seed=123, max_episode_steps=args.max_episode_steps, speed_increases=args.speed_increase)
     obs, _ = env.reset()
     obs_dim = obs.shape[-1]
     act_dim = env.action_space.n
@@ -131,6 +132,17 @@ def main():
     model_path = resolve_model_path(args.model, args.log_dir, args.ckpt_name)
     logger.info(f"Loading model from: {model_path}")
     model, obs_norm, cfg = load_checkpoint(model_path, obs_dim, act_dim, device=args.device)
+    try:
+        hidden_size = cfg.get("hidden", "n/a") if isinstance(cfg, dict) else "n/a"
+    except Exception:
+        hidden_size = "n/a"
+    num_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Model loaded: PpoModel(hidden={hidden_size}), total_params={num_params}")
+    logger.info(f"Policy head:\n{model.policy}")
+
+    # Track average action probabilities across evaluation as a compact summary of the final policy
+    avg_prob_sum = np.zeros(act_dim, dtype=np.float64)
+    prob_count = 0
 
     for ep in range(args.episodes):
         obs, _ = env.reset()
@@ -144,6 +156,9 @@ def main():
             with torch.no_grad():
                 logits, _ = model.forward(obs_t)
                 dist = torch.distributions.Categorical(logits=logits)
+                probs_np = dist.probs.squeeze(0).detach().cpu().numpy()
+                avg_prob_sum += probs_np
+                prob_count += 1
                 action = dist.probs.argmax(dim=-1)  # greedy
                 action = int(action.item())
 
@@ -154,6 +169,10 @@ def main():
         score = info.get('score', 'n/a')
         logger.info(f"[Episode {ep+1}] return={ep_ret:10.1f}  score={score:>5}")
     env.close()
+
+    if prob_count > 0:
+        avg_probs = (avg_prob_sum / prob_count).tolist()
+        logger.info(f"Final policy avg action probabilities over evaluation: {avg_probs}")
 
 
 if __name__ == "__main__":
