@@ -9,6 +9,8 @@ import argparse
 import logging
 import numpy as np
 import torch
+import os
+import glob
 
 
 logging.basicConfig(
@@ -56,20 +58,91 @@ def load_checkpoint(path: str, obs_dim: int, act_dim: int, device: str = "cpu"):
 
 
 
+def find_latest_run_dir(log_dir: str) -> str | None:
+    if not os.path.isdir(log_dir):
+        return None
+    subdirs = [
+        os.path.join(log_dir, d)
+        for d in os.listdir(log_dir)
+        if os.path.isdir(os.path.join(log_dir, d))
+    ]
+    if not subdirs:
+        return None
+    # Sort by modification time descending (newest first)
+    subdirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return subdirs[0]
+
+
+def resolve_model_path(model_arg: str | None, log_dir: str, ckpt_name: str) -> str:
+    # If a model argument is given:
+    # - If it's a directory, assume it's a run directory; look for ckpt_name inside it
+    # - If it's a file, use it directly
+    if model_arg:
+        if os.path.isdir(model_arg):
+            candidate = os.path.join(model_arg, ckpt_name)
+        else:
+            candidate = model_arg
+        if os.path.isfile(candidate):
+            return candidate
+        # Fallback: pick the newest .pt in that directory if present
+        if os.path.isdir(model_arg):
+            pt_files = sorted(
+                glob.glob(os.path.join(model_arg, "*.pt")),
+                key=lambda p: os.path.getmtime(p),
+                reverse=True,
+            )
+            if pt_files:
+                return pt_files[0]
+        raise FileNotFoundError(f"Model file not found: {candidate}")
+
+    # Otherwise, load from the latest run directory under log_dir
+    run_dir = find_latest_run_dir(log_dir)
+    if run_dir is None:
+        raise FileNotFoundError(f"No runs found under log_dir: {log_dir}")
+    candidate = os.path.join(run_dir, ckpt_name)
+    if os.path.isfile(candidate):
+        return candidate
+    # Fallback: pick the newest .pt in that run directory
+    pt_files = sorted(
+        glob.glob(os.path.join(run_dir, "*.pt")),
+        key=lambda p: os.path.getmtime(p),
+        reverse=True,
+    )
+    if pt_files:
+        return pt_files[0]
+    raise FileNotFoundError(f"No checkpoint found in latest run: {run_dir}")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", type=str, default="./dino_ppo.pt")
+    ap.add_argument("--model", type=str, default=None, help="Path to .pt file or a run directory. If omitted, loads the latest run.")
+    ap.add_argument("--log-dir", type=str, default="./pt_logs", help="Root directory containing per-run subdirectories.")
+    ap.add_argument("--ckpt-name", type=str, default="dino_ppo.pt", help="Expected checkpoint filename inside a run directory.")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--max-episode-steps", type=int, default=3000, help="Time-limit per episode in environment steps.")
+    ap.add_argument("--speed-increase", action="store_true", default=False, help="Enable speed increases.")
     args = ap.parse_args()
 
-    # Human render env
-    env = ChromeDinoEnv(render_mode="human", seed=123)
+    env = ChromeDinoEnv(render_mode="human", seed=123, max_episode_steps=args.max_episode_steps, speed_increases=args.speed_increase)
     obs, _ = env.reset()
     obs_dim = obs.shape[-1]
     act_dim = env.action_space.n
 
-    model, obs_norm, cfg = load_checkpoint(args.model, obs_dim, act_dim, device=args.device)
+    model_path = resolve_model_path(args.model, args.log_dir, args.ckpt_name)
+    logger.info(f"Loading model from: {model_path}")
+    model, obs_norm, cfg = load_checkpoint(model_path, obs_dim, act_dim, device=args.device)
+    try:
+        hidden_size = cfg.get("hidden", "n/a") if isinstance(cfg, dict) else "n/a"
+    except Exception:
+        hidden_size = "n/a"
+    num_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Model loaded: PpoModel(hidden={hidden_size}), total_params={num_params}")
+    logger.info(f"Policy head:\n{model.policy}")
+
+    # Track average action probabilities across evaluation as a compact summary of the final policy
+    avg_prob_sum = np.zeros(act_dim, dtype=np.float64)
+    prob_count = 0
 
     for ep in range(args.episodes):
         obs, _ = env.reset()
@@ -83,6 +156,9 @@ def main():
             with torch.no_grad():
                 logits, _ = model.forward(obs_t)
                 dist = torch.distributions.Categorical(logits=logits)
+                probs_np = dist.probs.squeeze(0).detach().cpu().numpy()
+                avg_prob_sum += probs_np
+                prob_count += 1
                 action = dist.probs.argmax(dim=-1)  # greedy
                 action = int(action.item())
 
@@ -93,6 +169,10 @@ def main():
         score = info.get('score', 'n/a')
         logger.info(f"[Episode {ep+1}] return={ep_ret:10.1f}  score={score:>5}")
     env.close()
+
+    if prob_count > 0:
+        avg_probs = (avg_prob_sum / prob_count).tolist()
+        logger.info(f"Final policy avg action probabilities over evaluation: {avg_probs}")
 
 
 if __name__ == "__main__":
