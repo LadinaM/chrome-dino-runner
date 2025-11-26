@@ -1,4 +1,3 @@
-# train_dino_agent.py
 from __future__ import annotations
 
 import warnings
@@ -39,7 +38,7 @@ logger = logging.getLogger("train_dino")
 # PPO model
 # ----------------------------
 class PpoModel(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int):
         super().__init__()
         self.policy = nn.Sequential(
             nn.Linear(obs_dim, hidden),
@@ -289,29 +288,76 @@ def ppo_train(cfg: PPOConfig):
 
     def maybe_switch_phase(global_step: int):
         nonlocal envs, next_obs, phase_idx, phase_kwargs
+
         target_idx = phase_idx
+
+        # --- Diagnostics for logging (default to NaN so it's obvious if missing) ---
+        avg_duck: float = float("nan")
+        avg_avoid: float = float("nan")
+        avg_ret: float = float("nan")
+        transition_reason: str | None = None
+
+        # Step-based schedule: move to the phase whose threshold we have reached
         for i, (th, _) in enumerate(thresholds):
             if global_step >= th:
                 target_idx = i
 
-        # skill-gated 0 -> 1
+        # --- Skill-gated 0 -> 1 ---
         if cfg.auto_curriculum and phase_idx == 0 and len(duck_rate_hist) >= max(20, cfg.n_envs):
             avg_duck = float(np.mean(duck_rate_hist))
             avg_avoid = float(np.mean(avoided_hist)) if avoided_hist else 0.0
             if avg_duck >= cfg.min_duck_rate_p0 and avg_avoid >= cfg.min_avoid_avg_p0:
                 target_idx = max(target_idx, 1)
+                transition_reason = "skill_gated_p0"
 
-        # skill-gated 1 -> 2
+        # --- Skill-gated 1 -> 2 ---
         if cfg.auto_curriculum and phase_idx == 1 and len(return_hist) >= max(20, cfg.n_envs):
             avg_ret = float(np.mean(return_hist))
-            avg_duck = float(np.mean(duck_rate_hist)) if duck_rate_hist else 0.0
+            avg_duck = float(np.mean(duck_rate_hist)) if duck_rate_hist else float("nan")
             if avg_ret >= cfg.min_return_avg_p1 and avg_duck >= cfg.min_duck_rate_p1:
                 target_idx = max(target_idx, 2)
+                transition_reason = "skill_gated_p1"
 
+        # --- If phase actually changes, log why and with which stats ---
         if target_idx != phase_idx:
+            if transition_reason is None:
+                transition_reason = "step_threshold"
+
             phase_idx = target_idx
             phase_kwargs = thresholds[phase_idx][1].copy()
-            logger.info(f"[{global_step}] Switching to phase {phase_idx} with kwargs={phase_kwargs}")
+
+            logger.info(
+                f"[{global_step}] Switching to phase {phase_idx} "
+                f"with kwargs={phase_kwargs} (reason={transition_reason})"
+            )
+
+            # TensorBoard: numeric reason code for easier plotting
+            reason_code_map = {
+                "step_threshold": 0,
+                "skill_gated_p0": 1,
+                "skill_gated_p1": 2,
+            }
+            tb.add_scalar("curriculum/transition_to_phase", phase_idx, global_step)
+            tb.add_scalar(
+                "curriculum/reason_code",
+                reason_code_map.get(transition_reason, -1),
+                global_step,
+            )
+
+            # Optional: log skill metrics at transition, if available
+            if not math.isnan(avg_duck):
+                tb.add_scalar("curriculum/avg_duck_at_transition", avg_duck, global_step)
+            if not math.isnan(avg_avoid):
+                tb.add_scalar("curriculum/avg_avoid_at_transition", avg_avoid, global_step)
+            if not math.isnan(avg_ret):
+                tb.add_scalar("curriculum/avg_return_at_transition", avg_ret, global_step)
+
+            tb.add_text(
+                "curriculum/transition_reason",
+                f"Switched to phase {phase_idx} at step {global_step} because {transition_reason}",
+                global_step,
+            )
+
             envs.close()
             envs = build_envs(phase_kwargs)
             next_obs, _ = envs.reset(seed=cfg.seed)
@@ -320,6 +366,9 @@ def ppo_train(cfg: PPOConfig):
             if obs_norm is not None:
                 obs_norm.update(next_obs)
                 next_obs = obs_norm.normalize(next_obs)
+
+        # Always log the current phase index as a function of global_step
+        tb.add_scalar("curriculum/phase", phase_idx, global_step)
 
     # ---------- Video helper ----------
     @torch.no_grad()
