@@ -32,6 +32,8 @@ pip install -r requirements.txt
 
 ### Run the game
 
+If you want to play the original game, run it with the following command:
+
 ```bash
 python chrome_dino.py
 ```
