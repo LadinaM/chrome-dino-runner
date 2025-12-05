@@ -3,11 +3,11 @@
   <h2 align="center" style="margin-top: -4px !important;">Play or train a Chrome Dino runner agent</h2>
 </p>
 
-### What is this?
+## What is this?
 
 A lightweight Python/PyGame remake of the Chrome offline dinosaur game. You can play it manually or train an RL agent that learns to dodge obstacles automatically.
 
-### Project structure
+## Project structure
 
 ```bash
 chrome-dino-runner/
@@ -22,7 +22,7 @@ chrome-dino-runner/
 └── requirements.txt
 ```
 
-### Setup
+## Setup
 
 ```bash
 git clone https://github.com/LadinaM/chrome-dino-runner.git
@@ -30,7 +30,7 @@ cd chrome-dino-runner
 pip install -r requirements.txt
 ```
 
-### Run the game
+## Run the game
 
 If you want to play the original game, run it with the following command:
 
@@ -48,7 +48,7 @@ python chrome_dino.py
 | p / ESC     | Pause           |
 | u           | Unpause         |
 
-### Train the RL agent
+## Train the RL agent
 
 - Start training (uses PPO with an auto-curriculum):
   ```bash
@@ -88,3 +88,44 @@ python chrome_dino.py
   - `--speed-increase`: enable speed ramping during eval
 
 For full hyperparameters, curriculum logic, or reward shaping details, check `train_dino_agent.py` and `chrome_dino_env.py`.
+
+## What is happening in the background for the RL part
+
+The training loop `ppo_train()` method is the orchestrator. It builds vectorized `ChromeDinoEnv`instances via `make_env()`, steps them to collect rollouts and feeds observations into the model. 
+
+```mermaid
+flowchart LR
+    subgraph Trainer["ppo_train()"]
+        R["Rollout Loop<br/>collect obs, actions, rewards"]
+        A["GAE / Returns<br/>compute_advantages"]
+        U["PPO Update<br/>ppo_update"]
+    end
+
+    subgraph Env["ChromeDinoEnv (Vector)"]
+        E1["Env 1"]
+        E2["Env 2"]
+        EN["Env N"]
+    end
+
+    subgraph Model["PpoModel"]
+        P["Policy Logits<br/>Categorical dist"]
+        V["Value Head<br/>V(s)"]
+    end
+
+    R -->|obs batch| P
+    P -->|action logits| R
+
+    R -->|actions| E1
+    R -->|actions| E2
+    R -->|actions| EN
+
+    E1 -->|obs, rewards, dones| R
+    E2 -->|obs, rewards, dones| R
+    EN -->|obs, rewards, dones| R
+
+    R -->|buffers| A
+    A -->|advantages, returns| U
+    U -->|grad step| P
+
+
+```
