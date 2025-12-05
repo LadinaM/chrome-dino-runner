@@ -23,9 +23,9 @@ from gymnasium.vector import SyncVectorEnv, AsyncVectorEnv
 from gymnasium.wrappers import RecordVideo
 from torch.utils.tensorboard import SummaryWriter
 
-from utilities.helpers import make_env      # must pass through phase kwargs
+from utilities.helpers import make_env
 from utilities.observations import set_seed, ObsNorm
-from chrome_dino_env import ChromeDinoEnv   # only used for evaluation video runs
+from chrome_dino_env import ChromeDinoEnv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,99 +33,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("train_dino")
 
-
-# ----------------------------
-# PPO model
-# ----------------------------
-class PpoModel(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int):
-        super().__init__()
-        self.policy = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, act_dim),
-        )
-        self.value = nn.Sequential(
-            nn.Linear(obs_dim, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        logits = self.policy(x)
-        value = self.value(x).squeeze(-1)
-        return logits, value
-
-    @torch.no_grad()
-    def act(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        logits, value = self.forward(x)
-        dist = torch.distributions.Categorical(logits=logits)
-        action = dist.sample()
-        logp = dist.log_prob(action)
-        return action, logp, value
-
-    def eval_actions(self, x: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        logits, value = self.forward(x)
-        dist = torch.distributions.Categorical(logits=logits)
-        logp = dist.log_prob(actions)
-        entropy = dist.entropy()
-        return logp, entropy, value
-
-
-# ----------------------------
-# Config (includes curriculum)
-# ----------------------------
-@dataclass
-class PPOConfig:
-    # PPO core
-    seed: int = 42
-    total_timesteps: int = 10_000_000
-    n_envs: int = 16
-    n_steps: int = 1024
-    gamma: float = 0.995
-    gae_lambda: float = 0.95
-    update_epochs: int = 4
-    clip_coef: float = 0.2
-    vf_clip_coef: float = 0.2
-    ent_coef: float = 0.02
-    vf_coef: float = 0.5
-    max_grad_norm: float = 0.5
-    lr: float = 2.5e-4
-    linear_lr: bool = True
-    hidden: int = 512
-    torch_compile: bool = False
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    norm_obs: bool = True
-    minibatch_size: int = 1024  # tune to your GPU; mb <= n_envs*n_steps
-
-    # Logging / I/O
-    log_dir: str = "./pt_logs"
-    save_path: str = "./dino_ppo.pt"
-    vec_backend: str = "async"  # "sync" or "async"
-
-    # Default single-phase fallbacks (used if auto_curriculum=False)
-    frame_skip: int = 1
-    speed_increases: bool = False
-    alive_reward: float = 0.05
-    death_penalty: float = -1.0
-    avoid_reward: float = 0.0
-    milestone_points: int = 0
-    milestone_bonus: float = 0.0
-    obs_speed_cap: float = 100.0
-    obs_ttc_cap: float = 300.0
-
-    # Curriculum toggles
-    auto_curriculum: bool = True
-
-    # Phase schedule as fractions of total_timesteps (monotonic)
-    phase_breaks: Tuple[float, ...] = (0.0, 0.05, 0.50)
-
-    # Kwargs per phase
-    phase_kwargs: Tuple[Dict, ...] = field(default_factory=lambda: (
+PHASE_KWARGS_DEFAULT: Tuple[Dict, ...] = (
     # Phase 0: birds only (teach duck)
     dict(
         frame_skip=1,
@@ -174,13 +82,115 @@ class PPOConfig:
         airtime_penalty=0.003,
         alive_reward=0.02,
         death_penalty=-1.0,
-        avoid_reward=0.01,   # <--- changed
+        avoid_reward=0.01,
         milestone_points=0,
         milestone_bonus=0.0,
         obs_speed_cap=100.0,
         obs_ttc_cap=300.0,
     ),
-))
+)
+
+
+class PpoModel(nn.Module):
+    """Simple shared-body policy/value network for discrete action PPO."""
+
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int):
+        """Initialize policy and value towers."""
+        super().__init__()
+        self.policy = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, act_dim),
+        )
+        self.value = nn.Sequential(
+            nn.Linear(obs_dim, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return policy logits and state value for a batch of observations."""
+        logits = self.policy(x)
+        value = self.value(x).squeeze(-1)
+        return logits, value
+
+    @torch.no_grad()
+    def act(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Sample an action from the categorical distribution over logits and return:
+        - logits: unnormalized action scores (implicit via dist)
+        - action: sampled discrete action index
+        - logp: log-probability of the sampled action under dist
+        - value: state-value estimate V(s)
+        """
+        logits, value = self.forward(x)
+        dist = torch.distributions.Categorical(logits=logits)
+        action = dist.sample()
+        logp = dist.log_prob(action)
+        return action, logp, value
+
+    def eval_actions(self, x: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluate provided actions, returning log-probs, entropy, and values."""
+        logits, value = self.forward(x)
+        dist = torch.distributions.Categorical(logits=logits)
+        logp = dist.log_prob(actions)
+        entropy = dist.entropy()
+        return logp, entropy, value
+
+
+
+@dataclass
+class PPOConfig:
+    """Configuration bundle for PPO training and curriculum settings."""
+    # PPO core
+    seed: int = 42
+    total_timesteps: int = 10_000_000
+    n_envs: int = 16
+    n_steps: int = 1024
+    gamma: float = 0.995
+    gae_lambda: float = 0.95
+    update_epochs: int = 4
+    clip_coef: float = 0.2
+    vf_clip_coef: float = 0.2
+    ent_coef: float = 0.02
+    vf_coef: float = 0.5
+    max_grad_norm: float = 0.5
+    lr: float = 2.5e-4
+    linear_lr: bool = True
+    hidden: int = 512
+    torch_compile: bool = False
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    norm_obs: bool = True
+    minibatch_size: int = 1024  # tune to your GPU; mb <= n_envs*n_steps
+
+    # Logging / I/O
+    log_dir: str = "./pt_logs"
+    save_path: str = "./dino_ppo.pt"
+    vec_backend: str = "async"  # "sync" or "async"
+
+    # Default single-phase fallbacks (used if auto_curriculum=False)
+    frame_skip: int = 1
+    speed_increases: bool = False
+    alive_reward: float = 0.05
+    death_penalty: float = -1.0
+    avoid_reward: float = 0.0
+    milestone_points: int = 0
+    milestone_bonus: float = 0.0
+    obs_speed_cap: float = 100.0
+    obs_ttc_cap: float = 300.0
+
+    # Curriculum toggles
+    auto_curriculum: bool = True
+
+    # Phase schedule as fractions of total_timesteps (monotonic)
+    phase_breaks: Tuple[float, ...] = (0.0, 0.05, 0.50)
+
+    # Kwargs per phase
+    phase_kwargs: Tuple[Dict, ...] = field(default_factory=lambda: PHASE_KWARGS_DEFAULT)
 
 
     # ------- Skill-gated promotion knobs (phase 0 -> 1) -------
@@ -193,10 +203,9 @@ class PPOConfig:
     min_duck_rate_p1: float = 0.08           # still demonstrate ducking sometimes
 
 
-# ----------------------------
-# Training
-# ----------------------------
+
 def ppo_train(cfg: PPOConfig):
+    """Train a PPO agent on Chrome Dino with optional curriculum scheduling."""
     set_seed(cfg.seed)
     # Each training run gets its own subdirectory under cfg.log_dir so that
     # TensorBoard, checkpoints, and videos are neatly grouped per run.
@@ -245,6 +254,7 @@ def ppo_train(cfg: PPOConfig):
 
     # ---------- Env builders ----------
     def build_envs(phase_kws: Dict):
+        """Create vectorized environments for the current curriculum phase."""
         if cfg.vec_backend == "async" and cfg.n_envs > 1:
             return AsyncVectorEnv([make_env(i, cfg.seed, **phase_kws) for i in range(cfg.n_envs)])
         else:
@@ -287,6 +297,7 @@ def ppo_train(cfg: PPOConfig):
     return_hist    = deque(maxlen=cfg.skill_window_episodes)
 
     def maybe_switch_phase(global_step: int):
+        """Adjust curriculum phase based on progress or skill metrics."""
         nonlocal envs, next_obs, phase_idx, phase_kwargs
 
         target_idx = phase_idx
@@ -373,6 +384,7 @@ def ppo_train(cfg: PPOConfig):
     # ---------- Video helper ----------
     @torch.no_grad()
     def record_policy_video(tag_percent: int, max_steps: int = 5000):
+        """Record a rollout video of the current policy at a given milestone."""
         fname = f"at_{tag_percent}pct"
         logger.info(f"Recording video at {tag_percent}%...")
         eval_env = ChromeDinoEnv(render_mode="rgb_array", seed=cfg.seed, **phase_kwargs)
@@ -391,6 +403,71 @@ def ppo_train(cfg: PPOConfig):
             steps += 1
         rec_env.close()
         logger.info(f"Saved video: {os.path.join(video_dir, fname)}.*")
+
+    def compute_advantages(next_value: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute GAE-λ advantages and returns for the current rollout."""
+        adv = np.zeros_like(rew_buf)
+        lastgaelam = np.zeros((cfg.n_envs,), dtype=np.float32)
+        next_val_local = next_value
+        for t in reversed(range(steps_per_update)):
+            not_done = 1.0 - done_buf[t]
+            # GAE-λ: A_t = δ_t + γλ (1 - done) A_{t+1}, where δ_t = r_t + γ V_{t+1} - V_t
+            delta = rew_buf[t] + cfg.gamma * next_val_local * not_done - val_buf[t]
+            lastgaelam = delta + cfg.gamma * cfg.gae_lambda * not_done * lastgaelam
+            adv[t] = lastgaelam
+            next_val_local = val_buf[t]
+        return adv, adv + val_buf
+
+    def ppo_update(
+        b_obs: torch.Tensor,
+        b_act: torch.Tensor,
+        b_logp_old: torch.Tensor,
+        b_adv: torch.Tensor,
+        b_ret: torch.Tensor,
+        b_val_old: torch.Tensor,
+        current_ent_coef: float,
+    ) -> Tuple[List[float], List[float], List[float]]:
+        """Run PPO minibatch updates and report losses and entropies."""
+        inds = np.arange(batch)
+        mb = cfg.minibatch_size
+        pol_losses, val_losses, ents = [], [], []
+
+        for _ in range(cfg.update_epochs):
+            np.random.shuffle(inds)
+            for start in range(0, batch, mb):
+                end = start + mb
+                mb_inds = inds[start:end]
+
+                logits, value = model.forward(b_obs[mb_inds])
+                dist = torch.distributions.Categorical(logits=logits)
+                logp = dist.log_prob(b_act[mb_inds])
+                entropy = dist.entropy().mean()
+
+                ratio = torch.exp(logp - b_logp_old[mb_inds])
+                surr1 = ratio * b_adv[mb_inds]
+                surr2 = torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef) * b_adv[mb_inds]
+                policy_loss = -torch.min(surr1, surr2).mean()
+
+                if cfg.vf_clip_coef > 0:
+                    v_clipped = b_val_old[mb_inds] + (value - b_val_old[mb_inds]).clamp(-cfg.vf_clip_coef, cfg.vf_clip_coef)
+                    v_loss_unclipped = (value - b_ret[mb_inds]) ** 2
+                    v_loss_clipped = (v_clipped - b_ret[mb_inds]) ** 2
+                    value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                else:
+                    value_loss = 0.5 * (b_ret[mb_inds] - value).pow(2).mean()
+
+                loss = policy_loss + cfg.vf_coef * value_loss - current_ent_coef * entropy
+
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                optimizer.step()
+
+                pol_losses.append(policy_loss.item())
+                val_losses.append(value_loss.item())
+                ents.append(entropy.item())
+
+        return pol_losses, val_losses, ents
 
     # ---------- Main loop ----------
     global_step = 0
@@ -499,16 +576,7 @@ def ppo_train(cfg: PPOConfig):
             next_obs_t = torch.as_tensor(next_obs, device=cfg.device, dtype=torch.float32)
             _, next_val_t = model.forward(next_obs_t)
             next_val = next_val_t.cpu().numpy()
-
-        adv_buf = np.zeros_like(rew_buf)
-        lastgaelam = np.zeros((cfg.n_envs,), dtype=np.float32)
-        for t in reversed(range(steps_per_update)):
-            not_done = 1.0 - done_buf[t]
-            delta = rew_buf[t] + cfg.gamma * next_val * not_done - val_buf[t]
-            lastgaelam = delta + cfg.gamma * cfg.gae_lambda * not_done * lastgaelam
-            adv_buf[t] = lastgaelam
-            next_val = val_buf[t]
-        ret_buf = adv_buf + val_buf
+        adv_buf, ret_buf = compute_advantages(next_val)
 
         # ------- Flatten and update -------
         b_obs = torch.as_tensor(obs_buf.reshape(batch, obs_dim), device=cfg.device)
@@ -520,46 +588,9 @@ def ppo_train(cfg: PPOConfig):
 
         b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
 
-        inds = np.arange(batch)
-        mb = cfg.minibatch_size
-
-        pol_losses, val_losses, ents = [], [], []
-
-        for epoch in range(cfg.update_epochs):
-            np.random.shuffle(inds)
-            for start in range(0, batch, mb):
-                end = start + mb
-                mb_inds = inds[start:end]
-
-                logits, value = model.forward(b_obs[mb_inds])
-                dist = torch.distributions.Categorical(logits=logits)
-                logp = dist.log_prob(b_act[mb_inds])
-                entropy = dist.entropy().mean()
-
-                ratio = torch.exp(logp - b_logp_old[mb_inds])
-                surr1 = ratio * b_adv[mb_inds]
-                surr2 = torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef) * b_adv[mb_inds]
-                policy_loss = -torch.min(surr1, surr2).mean()
-
-                if cfg.vf_clip_coef > 0:
-                    v_clipped = b_val_old[mb_inds] + (value - b_val_old[mb_inds]).clamp(-cfg.vf_clip_coef, cfg.vf_clip_coef)
-                    v_loss_unclipped = (value - b_ret[mb_inds]) ** 2
-                    v_loss_clipped = (v_clipped - b_ret[mb_inds]) ** 2
-                    value_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
-                else:
-                    value_loss = 0.5 * (b_ret[mb_inds] - value).pow(2).mean()
-
-                loss = policy_loss + cfg.vf_coef * value_loss - current_ent_coef * entropy
-
-
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-                optimizer.step()
-
-                pol_losses.append(policy_loss.item())
-                val_losses.append(value_loss.item())
-                ents.append(entropy.item())
+        pol_losses, val_losses, ents = ppo_update(
+            b_obs, b_act, b_logp_old, b_adv, b_ret, b_val_old, current_ent_coef
+        )
 
         # ------- Train logs -------
         if pol_losses:
@@ -606,10 +637,9 @@ def ppo_train(cfg: PPOConfig):
     logger.info("Training done.")
 
 
-# ----------------------------
-# CLI
-# ----------------------------
+
 def parse_args() -> PPOConfig:
+    """Parse CLI flags into a `PPOConfig`."""
     d = PPOConfig()
     p = argparse.ArgumentParser()
     # Core

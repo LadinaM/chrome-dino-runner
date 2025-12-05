@@ -21,6 +21,7 @@ FONT_COLOR = GameSettings.FONT_COLOR
 DELAY_IN_MS: int = 2000
 
 def main():
+    """Run the interactive Chrome Dino game loop."""
     global game_speed, x_pos_bg, y_pos_bg, points, obstacles
     run = True
     clock = pygame.time.Clock()
@@ -41,6 +42,7 @@ def main():
     pause = False
 
     def score():
+        """Update score, adjust speed, and render HUD."""
         global points, game_speed
         game_state.update_score()
         points = game_state.points
@@ -53,17 +55,20 @@ def main():
         GameRenderer.render_score(SCREEN, game_objects.font, points, highscore)
 
     def background():
+        """Scroll and render the background."""
         global x_pos_bg, y_pos_bg
         GameRenderer.update_background(SCREEN, ASSETS, game_state)
         x_pos_bg = game_state.x_pos_bg
         y_pos_bg = game_state.y_pos_bg
 
     def unpause():
+        """Resume the game loop after a pause."""
         nonlocal pause, run
         pause = False
         run = True
 
     def paused():
+        """Pause loop that waits for the unpause key."""
         nonlocal pause
         pause = True
         font = pygame.font.Font("freesansbold.ttf", 30)
@@ -121,6 +126,7 @@ def main():
 
 
 def menu(death_count):
+    """Menu screen for start/restart flow."""
     global points
     global FONT_COLOR
     run: bool = True

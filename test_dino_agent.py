@@ -1,5 +1,4 @@
 import warnings
-# Suppress warnings before any other imports
 warnings.filterwarnings("ignore", module="pygame.pkgdata")  # okay because version of pygame is pinned
 warnings.filterwarnings("ignore", message=".*pkg_resources.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*TensorFlow installation not found.*")
@@ -12,6 +11,11 @@ import torch
 import os
 import glob
 
+from torch.serialization import add_safe_globals
+
+from chrome_dino_env import ChromeDinoEnv
+from train_dino_agent import PpoModel
+from utilities.observations import ObsNorm
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,14 +24,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-from torch.serialization import add_safe_globals
-
-from chrome_dino_env import ChromeDinoEnv
-from train_dino_agent import PpoModel
-from utilities.observations import ObsNorm
-
-
 def load_checkpoint(path: str, obs_dim: int, act_dim: int, device: str = "cpu"):
+    """Load a saved PPO checkpoint and rebuild the model and obs normalizer."""
     # 1) Load (trusted local ckpt)
 
     add_safe_globals([np._core.multiarray._reconstruct])  # keep if weights_only=True path is used anywhere
@@ -59,6 +57,7 @@ def load_checkpoint(path: str, obs_dim: int, act_dim: int, device: str = "cpu"):
 
 
 def find_latest_run_dir(log_dir: str) -> str | None:
+    """Return the newest run directory under a log root, or None."""
     if not os.path.isdir(log_dir):
         return None
     subdirs = [
@@ -74,9 +73,12 @@ def find_latest_run_dir(log_dir: str) -> str | None:
 
 
 def resolve_model_path(model_arg: str | None, log_dir: str, ckpt_name: str) -> str:
-    # If a model argument is given:
-    # - If it's a directory, assume it's a run directory; look for ckpt_name inside it
-    # - If it's a file, use it directly
+    """
+    Resolve a checkpoint path from CLI input or latest run directory.
+    If a model argument is given:
+    - If it's a directory, assume it's a run directory; look for ckpt_name inside it
+    - If it's a file, use it directly
+    """
     if model_arg:
         if os.path.isdir(model_arg):
             candidate = os.path.join(model_arg, ckpt_name)
@@ -114,6 +116,7 @@ def resolve_model_path(model_arg: str | None, log_dir: str, ckpt_name: str) -> s
 
 
 def main():
+    """Evaluate a trained PPO agent in the Chrome Dino environment."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", type=str, default=None, help="Path to .pt file or a run directory. If omitted, loads the latest run.")
     ap.add_argument("--log-dir", type=str, default="./pt_logs", help="Root directory containing per-run subdirectories.")
