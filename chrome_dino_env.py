@@ -133,6 +133,7 @@ class ChromeDinoEnv(gym.Env):
 
     # ---------- Observations & info ----------
     def _nearest_obstacle(self, dino_x: float):
+        """Return the closest obstacle ahead of the dino, if any."""
         ahead = [o for o in self.game_state.obstacles if o.rect.x >= dino_x]
         return min(ahead, key=lambda o: o.rect.x, default=None)
 
@@ -187,6 +188,7 @@ class ChromeDinoEnv(gym.Env):
         )
 
     def _get_info(self) -> Dict[str, Any]:
+        """Return auxiliary info about the current game state."""
         return {
             'score': int(self.game_state.points),
             'game_speed': int(self.game_state.game_speed),
@@ -195,6 +197,7 @@ class ChromeDinoEnv(gym.Env):
 
     # ---------- Gym API ----------
     def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Reset the environment and return the initial observation and info."""
         super().reset(seed=seed)
 
         if seed is not None:
@@ -216,6 +219,7 @@ class ChromeDinoEnv(gym.Env):
         return self._get_obs(), self._get_info()
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        """Advance the environment by one step with the given action."""
         reward = 0.0
         terminated = False
         truncated = False
@@ -279,7 +283,7 @@ class ChromeDinoEnv(gym.Env):
 
             reward += self._alive_reward
 
-            # shaping:
+            # Shaping rewards: encourage ducking in the bird window, discourage idle ducks, and penalize airtime.
             # 1) in duck window vs bird
             if in_duck_window:
                 if action == 2 and grounded:
@@ -325,6 +329,7 @@ class ChromeDinoEnv(gym.Env):
 
     # --------- Game helpers ----------------
     def render(self):
+        """Render the current frame and return an array if rgb_array mode."""
         if self.render_mode == "human":
             self._render_frame()
             self._pump_events()
@@ -334,10 +339,12 @@ class ChromeDinoEnv(gym.Env):
             return np.transpose(arr, (1, 0, 2))  # (H, W, 3)
 
     def close(self):
+        """Close pygame resources."""
         pygame.quit()
 
     # ---------- Internals ----------
     def _apply_action(self, action: int) -> None:
+        """Map an integer action to player controls."""
         grounded = not self._is_airborne()
         if action == 1 and grounded:
             self.player.jump()
@@ -348,6 +355,7 @@ class ChromeDinoEnv(gym.Env):
             self.player.release_duck()
 
     def _spawn_and_update_obstacles(self) -> None:
+        """Spawn obstacles as needed and advance all active obstacles."""
         # spawn if none, according to probabilities
         if len(self.game_state.obstacles) == 0:
             r = self.np_random.random()
@@ -369,6 +377,7 @@ class ChromeDinoEnv(gym.Env):
         self._update_background()
 
     def _update_player(self) -> None:
+        """Advance the player animation and physics without keyboard input."""
         try:
             self.player.update(None)
         except TypeError:
@@ -378,6 +387,7 @@ class ChromeDinoEnv(gym.Env):
             self.player.update(_NullKeys())
 
     def _update_background(self) -> None:
+        """Scroll the background and reset when it wraps."""
         bg = self.ASSETS["BG"]
         w = bg.get_width()
         self.SCREEN.blit(bg, (self.game_state.x_pos_bg, GameSettings.Y_POS_BG))
@@ -387,11 +397,13 @@ class ChromeDinoEnv(gym.Env):
         self.game_state.x_pos_bg -= self.game_state.game_speed
 
     def _fill_bg(self) -> None:
+        """Fill the background based on day/night for render output."""
         current_hour = datetime.datetime.now().hour
         color = (255, 255, 255) if 7 < current_hour < 19 else (0, 0, 0)
         self.SCREEN.fill(color)
 
     def _render_frame(self):
+        """Draw all visible elements to the screen surface."""
         self._fill_bg()
         bg = self.ASSETS["BG"]
         w = bg.get_width()
@@ -405,6 +417,7 @@ class ChromeDinoEnv(gym.Env):
             self.clock.tick(self.metadata["render_fps"])
 
     def _check_collision(self):
+        """Return True if the player collides with any obstacle."""
         dino = self.player.dino_rect
         for ob in self.game_state.obstacles:
             if dino.colliderect(ob.rect):
@@ -412,9 +425,11 @@ class ChromeDinoEnv(gym.Env):
         return False
 
     def _is_airborne(self):
+        """Return True if the player is not on the ground."""
         return self.player.dino_rect.y < Dinosaur.Y_POS
 
     def _pump_events(self):
+        """Process pending pygame events and exit cleanly on quit."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()

@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def test_environment():
-    """Test the Chrome Dino environment"""
+    """Smoke-test the Chrome Dino environment with random, nondeterministic actions."""
     logger.info("Testing Chrome Dino Environment...")
     env = ChromeDinoEnv(render_mode="human")
     
