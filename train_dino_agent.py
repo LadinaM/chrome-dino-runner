@@ -166,6 +166,9 @@ class PPOConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     norm_obs: bool = True
     minibatch_size: int = 1024  # mb <= n_envs*n_steps
+=======
+    minibatch_size: int = 1024  # tune to your GPU; mb <= n_envs*n_steps
+>>>>>>> f233066c376dc7b6fa215ac511a00cd599c26ce2
 
     # Logging / I/O
     log_dir: str = "./pt_logs"
